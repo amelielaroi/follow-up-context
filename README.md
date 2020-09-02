@@ -25,3 +25,4 @@ Last update: September 2, 2020
 
 [4. Discussion of effect of Context and Idiomaticity on N400 and P600](./Longitudinal_effects_of_Context_and_Idiomaticity_on_the_N400_and_P600.pdf)
 
+[5. CSV file with complete set of materials](./materials_complete_paper.csv)
