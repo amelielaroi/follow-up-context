@@ -4,11 +4,16 @@ Supplementary materials for paper: La Roi, A., Sprenger, S.A., & Hendriks, P. Lo
 
 Last update: September 2, 2020
 
-[1a. Preprocessing of data exported from EEGLAB](./WordOrderStudy_Preprocessing.Rmd)
 
-[1b. Exported data EEGLAB](./Analysis_data_epochICA/)
+[1a. Lmer analysis of 300-400 ms time window](./Analysis_300-400ms_time_window.Rmd)
 
-[2a. Analysis of 300-400 ms time window](./Analysis_300-400ms_time_window.Rmd)
+[1b. Data file 300-400 ms time window - Baseline session](./S3.300-400_agg_v3.rdat)
+
+[1c. Data file 300-400 ms time window - Follow-up session](./300-400_agg.rdat)
+
+[2a. Lmer analysis of 400-500 ms time window](./Analysis_400-500ms_time_window.Rmd)
+
+[2b. Data file 400-500 ms time window - Baseline session](./400-500_agg.rdat)
 
 [2b. Analysis of 400-500 ms time window](./Analysis_400-500ms_time_window.Rmd)
 
