@@ -1,0 +1,852 @@
+---
+title: "Analysis 500-800 ms time window"
+author: "Amélie la Roi"
+date: "May 8, 2020"
+output: html_document
+---
+
+Last update: September 2, 2020
+
+
+# Data analysis on time window 500-800 ms
+
+## Load packages
+```{r warning=FALSE}
+library(plyr)
+library(dplyr)
+library(lme4)
+library(lmerTest)
+library(emmeans)
+library(multcomp)
+library(effects)
+library(ggplot2)
+library(patchwork)
+library(gridExtra)
+library(grid)
+library(pBrackets)
+library(cowplot)
+```
+
+
+## Load data
+```{r} 
+# Load data study 3
+print(load("G:/Back-up Y-schijf 12.03.2020/Study 3 - Follow-up MA thesis/Data/EEG/Preprocessing data/data_500-800_v3/S3.500-800_agg_v3.rdat"))
+
+# Load data study 0
+print(load("G:/Back-up Y-schijf 12.03.2020/Study 3 - Follow-up MA thesis/Data/EEG/Preprocessing data/data_500-800/500-800_agg.rdat"))
+
+# Check variable names in dataframes
+names(S3ALL.T4_agg)
+names(all.T4_agg)
+
+# Merge data study 0 and study 3
+ALL2.T4 <- rbind(S3ALL.T4_agg, all.T4_agg) # 112880 + 338280 = 451160 observations --> correct!
+
+# Check data
+str(ALL2.T4) # Subject has 66 levels --> correct (50 (T1) + 16 (T2))
+
+```
+
+
+### Add session variable
+```{r}
+ALL2.T4$Session[ALL2.T4$Subject %in% c("1","5","9","10","12","15","16",
+                                  "20","23","25","26","28","29","31",
+                                  "34","36","40","41","46","47","49",
+                                  "51","54","55","57","3","8","11","13",
+                                  "14","17","18","21","22","24","27","33",
+                                  "35","37","38","39","42","44","45","48",
+                                  "50","52","53","56","58")] <- "T1"
+
+ALL2.T4$Session[ALL2.T4$Subject %in% c("IAS30005_AR","IAS30009_AR","IAS30010_AR","IAS30016_AR","IAS30020_AR",
+              "IAS30026_AR","IAS30029_AR","IAS30031_AR","IAS30034_AR","IAS30036_AR",
+              "IAS30040_AR","IAS30041_AR","IAS30049_AR","IAS30051_AR",
+              "IAS30054_AR","IAS30057_AR")] <- "T2"
+
+ALL2.T4$Session <- as.factor(ALL2.T4$Session)
+
+```
+
+
+### Tidy variables
+```{r results='hide'}
+# Rename subject variable study 3
+ALL2.T4$Subject <- revalue(ALL2.T4$Subject, c("IAS30005_AR"="5","IAS30009_AR"="9","IAS30010_AR"="10","IAS30016_AR"="16",
+                         "IAS30020_AR"="20","IAS30026_AR"="26","IAS30029_AR"="29","IAS30031_AR"="31",
+                         "IAS30034_AR"="34","IAS30036_AR"="36","IAS30040_AR"="40","IAS30041_AR"="41",
+                         "IAS30049_AR"="49","IAS30051_AR"="51","IAS30054_AR"="54", "IAS30057_AR"="57"))
+
+#check data
+str(ALL2.T4) # Subject variable has 50 levels --> correct
+
+# Only select data older adults
+ALL3.T4 <- droplevels(ALL2.T4[ALL2.T4$Group == 'senior',])
+
+# Check data
+str(ALL3.T4) # Subject variable has 25 levels --> correct
+
+# check dummy coding and relevel if necessary
+contrasts(ALL3.T4$Session)
+
+# check Context factor
+ALL3.T4 <- rename(ALL3.T4, Context=Constraint) # rename factor to 'Context'
+contrasts(ALL3.T4$Context)
+ALL3.T4$Context <- relevel(ALL3.T4$Context, "Neutral")
+ALL3.T4$Context <- revalue(ALL3.T4$Context, c("High"="Predictive")) # rename factor level 'High' to 'Predictive'
+contrasts(ALL3.T4$Context)
+
+# Check Idiomaticity factor
+contrasts(ALL3.T4$Idiomaticity)
+ALL3.T4$Idiomaticity <- relevel(ALL3.T4$Idiomaticity, "Lit")
+
+# Check Correctness factor
+ALL3.T4 <- rename(ALL3.T4, Correctness=Condition)
+contrasts(ALL3.T4$Correctness)
+
+# Check dataframe
+head(ALL3.T4)
+summary(ALL3.T4)
+str(ALL3.T4)
+```
+
+# Create dataset for analysis
+```{r}
+# Compute mean voltage over session, group, the 8 experimental conditions, and the 4 ROIs
+ALL3.T4_agg <- ddply(ALL3.T4, c("Subject", "Session", "Group", "Context", "Idiomaticity", "Correctness", 
+                                "TrialNr", "Target", "Anteriority", "Hemisphere", "ROI"), summarise, 
+                                mean.mV = mean(mV, na.rm=TRUE),
+                                subj.n = length(mV[!is.na(mV)]))
+
+str(ALL3.T4_agg)
+
+# Only select posterior ROIs
+ALL3.T4_post1 <- droplevels(ALL3.T4_agg[ALL3.T4_agg$Anteriority == 'post',])
+str(ALL3.T4_post1)
+summary(ALL3.T4_post1)
+
+# Load VF data
+print(load("G:/Back-up Y-schijf 12.03.2020/Study 3 - Follow-up MA thesis/Data/Cognitive tasks/Verbal fluency/S0S3_VF_final.rdat"))
+
+# Remove redundant columns
+VF_final <- subset(VF4, select=c(Subject, Session, Cat.c, Let.c, Total.c))
+
+# Merge VF scores with EEG data
+ALL3.T4_post <- merge(ALL3.T4_post1, VF_final, by=c("Subject", "Session"))
+summary(ALL3.T4_post)
+```
+
+# Test for general longitudinal effects in the P600
+```{r}
+# Average mean voltages over Context and Idiomaticity
+ALL3.T4_P600 <- ddply(ALL3.T4_post, c("Subject", "Session", "Group", "Correctness", "TrialNr", "Target", "Anteriority", "Hemisphere", "ROI"), summarise, mean.mV = mean(mean.mV, na.rm=TRUE))
+
+# Only select posterior ROIs
+T4P600_post <- droplevels(ALL3.T4_P600[ALL3.T4_P600$Anteriority=='post',])
+
+# Fit model on general N400 effect in baseline and follow-up session
+m0.T4 <- lmer(mean.mV ~ Session * Correctness + Hemisphere + (1|Subject) + (1|Target), data=T4P600_post, control=lmerControl(optimizer="Nelder_Mead"), REML=F)
+summary(m0.T4) # Significant interaction between Session * Correctness, so general P600 effect seems to change over time
+
+# Compute contrasts
+(T4_contrastP600_Correctness <- lsmeans(m0.T4, pairwise ~ Correctness|Session))
+(T4_contrastN400_Session <- lsmeans(m0.T4, pairwise ~ Session|Correctness))
+
+# Change reference level of correctness to facilitate interpretation of planned comparisons on N400 effect
+contrasts(T4P600_post$Correctness)
+T4P600_post$Correctness <- relevel(T4P600_post$Correctness, "incorrect")
+
+# Fit model again with relevel factor
+m0a.T4 <- lmer(mean.mV ~ Session * Correctness + Hemisphere + (1|Subject) + (1|Target), data=T4P600_post, control=lmerControl(optimizer="Nelder_Mead"), REML=F)
+
+(T4_contrastN400_Correctness_v2 <- lsmeans(m0a.T4, pairwise ~ Correctness|Session))
+(T4_contrastN400_Session_v2 <- lsmeans(m0a.T4, pairwise ~ Session|Correctness))
+
+m0b.T4 <- lmer(mean.mV ~ Session + Correctness + Hemisphere + (1|Subject) + (1|Target), data=T4P600_post, control=lmerControl(optimizer="Nelder_Mead"), REML=F)
+anova(m0a.T4, m0b.T4)
+AIC(m0b.T4)-AIC(m0a.T4)
+```
+
+## Plot general longitudinal effects in the P600 effect
+
+# Plot P600 effect in barplot
+```{r}
+
+# Compute mean voltage for correct and incorrect target words in baseline and follow-up session
+plot_m0.T4 <- allEffects(m0.T4)
+plot_m0.T4 # print effects
+
+# Save interaction effect of the model in a dataframe
+## 300-400 ms
+T4intP600 <- plot_m0.T4[[2]] # save the interaction effect
+T4intP600.df <- as.data.frame(T4intP600) # convert into dataframe
+
+# Rename factor levels Session
+levels(T4intP600.df$Session)[levels(T4intP600.df$Session)=="T1"] <- "Baseline"
+levels(T4intP600.df$Session)[levels(T4intP600.df$Session)=="T2"] <- "Follow-up"
+contrasts(T4intP600.df$Session)
+
+# Make barplot
+(TW4_P600_bar <- ggplot(data=T4intP600.df, aes(x=Session, y=fit, fill=Correctness)) +
+  geom_bar(stat="identity", position=position_dodge(), colour="black", size=1) +
+  scale_fill_grey() + coord_cartesian(ylim=c(-1,4)) + scale_y_continuous(breaks=seq(-1,4,1)) +
+  background_grid(major='none', minor="none") + labs(x=NULL, y="\nFitted values mV") +
+  ggtitle("\n500-800 ms") + theme_classic() +
+  theme(plot.title=element_text(size= 24, color="black", face="bold", hjust=0.5),
+  axis.title.y=element_text(size=32, color="black", face="bold"), axis.text=element_text(size=28, color="black", face="bold"), axis.line=element_line(size=1), axis.ticks = element_line(size=1), axis.ticks.length = unit(0.3,"cm"), 
+  legend.text=element_text(size=24, color="black"), legend.title=element_text(size=28, color="black", face="bold"),
+  legend.position="bottom",
+  plot.margin=margin(r=1, l=1, unit="cm"), panel.grid.major.y=element_blank())+
+  geom_errorbar(aes(ymin=fit-se, ymax=fit+se), width=0.2, position=position_dodge(0.9)))
+
+# Save plot
+ggsave(TW4_P600_bar, file="./Plots/Rplots/TW4_P600_bar.png", width=10, height=10, units="in")
+ggsave(TW4_P600_bar, file="./Plots/Rplots/TW4_P600_bar.pdf", width=10, height=10, units="in")
+ggsave(TW4_P600_bar, file="./Plots/Rplots/TW4_P600_bar.tiff", width=10, height=10, units="in")
+
+# Add significance stars
+## Write function to add brackets and save plot
+bracketsGrob <- function(...){
+l <- list(...)
+e <- new.env()
+e$l <- l
+  grid:::recordGrob(  {
+    do.call(grid.brackets, l)
+  }, e)
+}
+
+# Define position of brackets
+b1 <- bracketsGrob(0.18, 0.90, 0.37, 0.90, h=0.02, lwd=1, col="black", type=1, ticks=NULL) # 
+b2 <- bracketsGrob(0.63, 0.90, 0.82, 0.90, h=0.02,  lwd=1, col="black", type=1, ticks=NULL) # 
+b3 <- bracketsGrob(0.82, 0.15, 0.37, 0.15, h=0.02,  lwd=1, col="black", type=1, ticks=NULL) # 
+
+
+## Add brackets and significance stars to plot
+(TW4_P600_bar_final <- TW4_P600_bar + 
+                    annotation_custom(b1) + annotation_custom(b2) + 
+                    annotation_custom(b3) + 
+                    annotate("text", label="***", x=1.00, y= 3.90) + #Baseline incorrect - correct
+                    annotate("text", label="***", x=2.00, y= 3.90) + # Follow-up incorrect - correct
+                    annotate("text", label="***", x=1.73, y= -0.65))  # Incorrect Baseline vs. Follow-up
+
+# Save plot
+# ggsave(TW4_P600_bar_final, file="./Plots/Rplots/TW4_P600_bar_final.png", width=10, height=10, units="in")
+# ggsave(TW4_P600_bar_final, file="./Plots/Rplots/TW4_P600_bar_final.pdf", width=10, height=10, units="in")
+# ggsave(TW4_P600_bar_final, file="./Plots/Rplots/TW4_P600_bar_final.tiff", width=10, height=10, units="in")
+
+```
+
+
+# Model fitting
+## Start with full model with by-Subject and by-Target(=item) random intercepts
+```{r}
+m1.T4 <- lmer(mean.mV ~ Session * Context * Idiomaticity * Correctness + (1|Subject) + (1|Target), data=ALL3.T4_post, control=lmerControl(optimizer="bobyqa"), REML=F)
+
+summary(m1.T4) # significant 2-way interactions; trend for Session*Idiomaticity*Correctness
+```
+
+## Remove Context from 4-way interaction
+```{r}
+m2.T4 <- lmer(mean.mV ~ Session * Idiomaticity * Correctness + Context + (1|Subject) + (1|Target), data=ALL3.T4_post, control=lmerControl(optimizer="bobyqa"), REML=F)
+summary(m2.T4) # interaction Session*Idiomaticity*Correctness is still only a trend
+AIC(m2.T4)-AIC(m1.T4) # model with 4-way interaction has lower AIC
+anova(m2.T4, m1.T4) # 4-way interaction significantly improves model fit
+```
+
+## Remove Idiomaticity from 4-way interaction
+```{r}
+m3.T4 <- lmer(mean.mV ~ Session * Context * Correctness + Idiomaticity + (1|Subject) + (1|Target), data=ALL3.T4_post, control=lmerControl(optimizer="bobyqa"), REML=F)
+summary(m3.T4) # 3-way interaction is not significant
+AIC(m3.T4) - AIC(m1.T4) # model with 4-way interaction has lower AIC than model with 3-way interaction
+anova(m3.T4, m1.T4) # 4-way interaction significantly improves model fit
+```
+
+## Remove Session from 4-way interaction 
+```{r}
+m4.T4 <- lmer(mean.mV ~ Session + Context * Idiomaticity * Correctness + (1|Subject) + (1|Target), data=ALL3.T4_post, control=lmerControl(optimizer="bobyqa"), REML=F)
+summary(m4.T4) # 
+AIC(m4.T4)-AIC(m1.T4) # model with 4-way interaction has lower AIC 
+anova(m1.T4, m4.T4) # 4-way interaction significantly improves model fit
+```
+
+## Remove Correctness from 4-way interaction
+```{r}
+m5.T4 <- lmer(mean.mV ~ Session * Context * Idiomaticity + Correctness + (1|Subject) + (1|Target), data=ALL3.T4_post, control=lmerControl(optimizer="bobyqa"), REML=F)
+summary(m5.T4) # 3-way interaction not significant
+AIC(m5.T4)-AIC(m1.T4) # model with 4-way interaction has lower AIC
+anova(m1.T4, m5.T4) # 4-way interaction significantly improves model fit
+```
+
+### BEST MODEL SO FAR: m1.T4 (full model)
+
+## Test effect Hemisphere
+```{r}
+
+# Test effect Hemisphere
+m6.T4 <- lmer(mean.mV ~ Session * Context * Idiomaticity * Correctness + Hemisphere + (1|Subject) + (1|Target), data=ALL3.T4_post, control=lmerControl(optimizer="bobyqa"), REML=F)
+summary(m6.T4) # Hemisphere is not significant 
+AIC(m6.T4)-AIC(m1.T4) # no AIC difference
+anova(m1.T4, m6.T4) # including Hemisphere does not significantly improve model fit, but keep in for clarity
+```
+
+## Add random slopes
+```{r}
+# Add random slope for Idiomaticity per Subject
+m7.T4 <- lmer(mean.mV ~ Session * Context * Idiomaticity * Correctness + Hemisphere + (1+Idiomaticity|Subject) + (1|Target), data=ALL3.T4_post, control=lmerControl(optimizer="bobyqa"), REML=T)
+summary(m7.T4)
+
+ # Fit model with REML=T to compare to random slope model
+m6a.T4 <- lmer(mean.mV ~ Session * Context * Idiomaticity * Correctness + Hemisphere + (1|Subject) + (1|Target), data=ALL3.T4_post, control=lmerControl(optimizer="bobyqa"), REML=T)
+
+anova(m6a.T4, m7.T4) # model with random slope is significantly better
+
+# Add random slope for Context per Target
+m8.T4 <- lmer(mean.mV ~ Session * Context * Idiomaticity * Correctness + Hemisphere + (1+Idiomaticity|Subject) + (1+Context|Target), data=ALL3.T4_post, control=lmerControl(optimizer="bobyqa"), REML=T)
+summary(m8.T4)
+
+anova(m7.T4, m8.T4) # model with both random slopes is significantly better
+
+```
+
+
+## Test effect Verbal fluency
+```{r}
+
+# Test effect category fluency
+m9.T4 <- lmer(mean.mV ~ Session * Context * Idiomaticity * Correctness + Hemisphere + Cat.c + (1+Idiomaticity|Subject) + (1+Context|Target), data=ALL3.T4_post, control=lmerControl(optimizer="bobyqa"), REML=F)
+summary(m9.T4)# Category fluency is significant --> higher category fluency is associated with more positivity?
+
+# Fit m8.T4 with REML=F to enable model comparison
+m8a.T4 <- lmer(mean.mV ~ Session * Context * Idiomaticity * Correctness + Hemisphere + (1+Idiomaticity|Subject) + (1+Context|Target), data=ALL3.T4_post, control=lmerControl(optimizer="bobyqa"), REML=F)
+
+AIC(m8a.T4)-AIC(m9.T4) # model including Category fluency has lower AIC
+anova(m8a.T4, m9.T4) # inclusion of category fluency sigificantly improves model fit
+
+# Test effect letter fluency
+m10.T4 <- lmer(mean.mV ~ Session * Context * Idiomaticity * Correctness + Hemisphere + Let.c + (1+Idiomaticity|Subject) + (1+Context|Target), data=ALL3.T4_post, control=lmerControl(optimizer="bobyqa"), REML=F)
+summary(m10.T4)# Letter fluency is not significant
+AIC(m10.T4)-AIC(m8a.T4) # no difference in AIC
+anova(m10.T4, m8a.T4) # inclusion of letter fluency doesn't sigificantly improve model fit
+
+```
+
+
+
+# BEST MODEL: m9.T4 
+
+## Check distribution of residuals and trim model if needed
+```{r}
+# Fit final model with REML=T
+m9a.T4 <- lmer(mean.mV ~ Session * Context * Idiomaticity * Correctness + Hemisphere + Cat.c + (1+Idiomaticity|Subject) + (1+Context|Target), data=ALL3.T4_post, control=lmerControl(optimizer="bobyqa"), REML=T)
+summary(m9a.T4)
+
+qqnorm(resid(m9a.T4))
+qqline(resid(m9a.T4)) # some extreme outliers
+plot(fitted(m9a.T4), resid(m9a.T4)) # some extreme outliers
+hist(resid(m9a.T4)) # some extreme outliers
+
+## trim data
+ALL3.T4_post.trim <- ALL3.T4_post[abs(scale(resid(m9a.T4))) < 2.5, ]
+
+## save trimmed data
+save(ALL3.T4_post.trim, file="./EEG - Final data/ALL3.T4_post.trim_v3.rdat" )
+
+## fit model with trimmed data
+m9b.T4 <- lmer(mean.mV ~ Session * Context * Idiomaticity * Correctness + Hemisphere + Cat.c + (1+Idiomaticity|Subject) + (1+Context|Target), data=ALL3.T4_post.trim, control=lmerControl(optimizer="Nelder_Mead"), REML=T)
+summary(m9b.T4) # Category fluency still significant
+
+## check how much data was removed
+(noutliers <- sum(abs(scale(resid(m9a.T4))) >= 2.5))
+noutliers/nrow(ALL3.T4_post) # only 1.7 % of the data was removed
+
+## check change in correlation between observed and fitted values after trimming the data
+cor(ALL3.T4_post$mean.mV, fitted(m9a.T4))^2 # is 0.142
+cor(ALL3.T4_post.trim$mean.mV, fitted(m9b.T4))^2 # increased to 0.159
+
+## check distribution of residuals after trimming
+qqnorm(resid(m9b.T4))
+qqline(resid(m9b.T4)) # better distribution
+plot(fitted(m9b.T4), resid(m9b.T4)) # better, no pattern in data
+hist(resid(m9b.T4)) # looks normal
+```
+
+
+
+# Final model: m9b.T4 (for summmary of coefficients final model set REML to TRUE)
+
+# To get insight in the direction of the interaction between Context x Idiomaticity, Session x Correctness, and Idiomaticity x Correctness, calculate contrasts
+```{r}
+(T4_contrast_Context <- lsmeans(m9b.T4, pairwise ~ Context|Idiomaticity)) # Predictive is significantly more positive than Neutral, but only in Literal sentences --> consistent with Context paper
+(T4_contrast_Idiomaticity <- lsmeans(m9b.T4, pairwise ~ Idiomaticity|Context)) # Idiom is significantly more positive than Literal in both Neutral and Predictive
+(T4_contrast_Session <- lsmeans(m9b.T4, pairwise ~ Correctness|Session)) # Incorrect is significantly more positive than correct in both T1 and T2, but difference is larger in T2
+(T4_contrast_Session2 <- lsmeans(m9b.T4, pairwise ~ Session|Correctness))
+(T4_contrast_Idiomaticity <- lsmeans(m9b.T4, pairwise ~ Idiomaticity|Correctness)) # Idiom is signficantly more positive than Literal in both correct and incorrect, but difference is bigger in incorrect
+(T4_contrast_Correctness <- lsmeans(m9b.T4, pairwise ~ Correctness|Idiomaticity)) # incorrect significantly more positive than correct in both Lit and Idiom, but difference is larger in Idiom
+
+# visualize interaction
+lsmip(m9b.T4, Context ~ Idiomaticity)
+lsmip(m9b.T4, Correctness ~ Session)
+lsmip(m9b.T4, Correctness ~ Idiomaticity)
+
+```
+
+## Change reference level of Correctness to make contrast easier to interpret
+```{r}
+contrasts(ALL3.T4_post.trim$Correctness)
+ALL3.T4_post.trim$Correctness <- relevel(ALL3.T4_post.trim$Correctness, "incorrect")
+contrasts(ALL3.T4_post.trim$Correctness) # now incorrect is reference level
+
+# Fit model again with releveled factor
+m9c.T4 <- lmer(mean.mV ~ Session * Context * Idiomaticity * Correctness + Hemisphere + Cat.c + (1+Idiomaticity|Subject) + (1+Context|Target), data=ALL3.T4_post.trim, control=lmerControl(optimizer="Nelder_Mead"), REML=T)
+
+# Compute contrasts including Correctness again
+(T4_contrast_Session <- lsmeans(m9c.T4, pairwise ~ Correctness|Session))
+(T4_contrast_Idiomaticity <- lsmeans(m9c.T4, pairwise ~ Idiomaticity|Correctness)) 
+(T4_contrast_Correctness <- lsmeans(m9c.T4, pairwise ~ Correctness|Idiomaticity))
+```
+
+
+### Save final models
+```{r}
+save(m9b.T4, file="./EEG - Final data/m9b.T4.rdat" )
+save(m9c.T4, file="./EEG - Final data/m9c.T4.rdat" )
+
+```
+
+
+## Make bar plots of the fitted values predicted by the model in the P600 time window
+```{r}
+# Save effects for the model
+## 500-800 ms
+plot_m9b.T4 <- allEffects(m9b.T4)
+plot_m9b.T4 # print effects
+
+# Save interaction effect of the model in a dataframe
+## 500-800 ms
+T4int <- plot_m9b.T4[[3]] # save the interaction effect
+T4int.df <- as.data.frame(T4int) # convert into dataframe
+T4int.df <- droplevels(T4int.df)
+```
+
+# Check reference levels
+```{r}
+# Factor Session
+contrasts(T4int.df$Session) # T1 is reference level --> correct
+levels(T4int.df$Session)[levels(T4int.df$Session)=="T1"] <- "Session 1"
+levels(T4int.df$Session)[levels(T4int.df$Session)=="T2"] <- "Session 2"
+
+# Factor Context
+contrasts(T4int.df$Context) # Neutral is reference level --> correct
+
+# Factor Idiomaticity
+contrasts(T4int.df$Idiomaticity) # Idiom is reference level --> relevel
+T4int.df$Idiomaticity <- factor(T4int.df$Idiomaticity, levels=c("Lit", "Idiom"))
+contrasts(T4int.df$Idiomaticity) # Now Lit is reference level --> correct
+levels(T4int.df$Idiomaticity)[levels(T4int.df$Idiomaticity)=="Lit"] <- "Literal"
+levels(T4int.df$Idiomaticity)[levels(T4int.df$Idiomaticity)=="Idiom"] <- "Idiomatic"
+contrasts(T4int.df$Idiomaticity)
+
+# Factor Correctness
+contrasts(T4int.df$Correctness) # correct is reference level
+
+```
+
+
+# Create dataframes for each interaction
+## For Session x Correctness
+```{r}
+
+T4int.SesCor <- ddply(T4int.df, c("Session", "Correctness"), summarise,
+                      mean.fit = mean(fit, na.rm=TRUE),
+                      mean.se = mean(se, na.rm=TRUE),
+                      mean.lower = mean(lower, na.rm=TRUE),
+                      mean.upper = mean(upper, na.rm=TRUE))
+
+
+T4int.IdiomCor <- ddply(T4int.df, c("Idiomaticity", "Correctness"), summarise,
+                      mean.fit = mean(fit, na.rm=TRUE),
+                      mean.se = mean(se, na.rm=TRUE),
+                      mean.lower = mean(lower, na.rm=TRUE),
+                      mean.upper = mean(upper, na.rm=TRUE))
+
+
+T4int.ContIdiom <- ddply(T4int.df, c("Context", "Idiomaticity"), summarise,
+                      mean.fit = mean(fit, na.rm=TRUE),
+                      mean.se = mean(se, na.rm=TRUE),
+                      mean.lower = mean(lower, na.rm=TRUE),
+                      mean.upper = mean(upper, na.rm=TRUE))  
+
+
+```
+
+
+# Plot the fitted values for the interaction in the P600 in grey
+```{r}
+
+#------------------------------------------
+# 500-800 ms 
+#------------------------------------------
+## Plot interaction Session * Correctness
+(ggplotT4_SesCor <- ggplot(data=T4int.SesCor, aes(x=Session, y=mean.fit, fill=Correctness)) +
+  geom_bar(stat="identity", position=position_dodge(), color='black', linetype=0) +
+  scale_fill_grey() + coord_cartesian(ylim=c(-1,4)) + scale_y_continuous(breaks=seq(-1,4,1)) +
+  background_grid(major='y', minor="none") + labs(x=NULL, y="\nFitted values mV", tag="A") +
+  ggtitle(expression(atop(bold("500 - 800 ms\nSession * Correctness")))) + theme_classic() +
+  theme(plot.title=element_text(size= 16, color="black", face="bold", hjust=0.5, vjust=-5), axis.title.y=element_text(size=16, color="black", face="bold"), axis.text=element_text(size=16, color="black", face="bold"), legend.text=element_text(size=14, color="black"), legend.title=element_text(size=16, color="black", face="bold"), plot.margin=margin(r=1, l=1, unit="cm"))+
+  geom_errorbar(aes(ymin=mean.fit-mean.se, ymax=mean.fit+mean.se), width=0.2, position=position_dodge(0.9)))
+
+
+## Plot interaction Idiomaticity * Correctness
+(ggplotT4_IdiomCor <- ggplot(data=T4int.IdiomCor, aes(x=Idiomaticity, y=mean.fit, fill=Correctness)) +
+  geom_bar(stat="identity", position=position_dodge(), color='black', linetype=0) +
+  scale_fill_grey() + coord_cartesian(ylim=c(-1,4)) + scale_y_continuous(breaks=seq(-1,4,1)) +
+  background_grid(major='y', minor="none") + labs(x=NULL, y="\nFitted values mV", tag="B") +
+  ggtitle(expression(atop(bold("500 - 800 ms\nIdiomaticity * Correctness")))) + theme_classic() +
+  theme(plot.title=element_text(size= 16, color="black", face="bold", hjust=0.5, vjust=-5), axis.title.y=element_text(size=16, color="black", face="bold"), axis.text=element_text(size=16, color="black", face="bold"), legend.text=element_text(size=14, color="black"), legend.title=element_text(size=16, color="black", face="bold"), plot.margin=margin(r=1, l=1, unit="cm"))+
+  geom_errorbar(aes(ymin=mean.fit-mean.se, ymax=mean.fit+mean.se), width=0.2, position=position_dodge(0.9)))
+
+## Plot interaction Context * Idiomaticity
+(ggplotT4_ContIdiom <- ggplot(data=T4int.ContIdiom, aes(x=Context, y=mean.fit, fill=Idiomaticity)) +
+  geom_bar(stat="identity", position=position_dodge(), color='black', linetype=0) +
+  scale_fill_grey() + coord_cartesian(ylim=c(-1,4)) + scale_y_continuous(breaks=seq(-1,4,1)) +
+  background_grid(major='y', minor="none") + labs(x=NULL, y="\nFitted values mV", tag="C") +
+  ggtitle(expression(atop(bold("500 - 800 ms\nContext * Idiomaticity")))) + theme_classic() +
+  theme(plot.title=element_text(size= 16, color="black", face="bold", hjust=0.5, vjust=-5), axis.title.y=element_text(size=16, color="black", face="bold"), axis.text=element_text(size=16, color="black", face="bold"), legend.text=element_text(size=14, color="black"), legend.title=element_text(size=16, color="black", face="bold"), plot.margin=margin(r=1, l=1, unit="cm"))+
+  geom_errorbar(aes(ymin=mean.fit-mean.se, ymax=mean.fit+mean.se), width=0.2, position=position_dodge(0.9)))
+
+# Combine plots
+(intP600_withlegend <- cowplot::plot_grid(ggplotT4_SesCor + theme(legend.position="bottom"),
+                            ggplotT4_IdiomCor + theme(legend.position="bottom"),
+                            ggplotT4_ContIdiom + theme(legend.position="bottom"),
+                            ncol=3, nrow=1, align='vh'))
+
+
+```
+
+
+## Add brackets and significance stars to the plot
+```{r}
+# Write function to add brackets and save plot
+bracketsGrob <- function(...){
+l <- list(...)
+e <- new.env()
+e$l <- l
+  grid:::recordGrob(  {
+    do.call(grid.brackets, l)
+  }, e)
+}
+
+# 500-800 ms
+## Session * Correctness
+b1 <- bracketsGrob(0.18, 0.92, 0.37, 0.92, h=0.02, lwd=1, col="black", type=1, ticks=NULL) # T1 incorrect - correct
+b2 <- bracketsGrob(0.63, 0.92, 0.82, 0.92, h=0.02,  lwd=1, col="black", type=1, ticks=NULL) # T2 incorrect - correct
+b3 <- bracketsGrob(0.82, 0.16, 0.37, 0.16, h=0.02,  lwd=1, col="black", type=1, ticks=NULL) # incorrect T1-T2
+
+### Add brackets and significance stars to plot
+(T4_SesCor <- ggplotT4_SesCor + 
+                    annotation_custom(b1) + annotation_custom(b2) +
+                    annotation_custom(b3) +
+                    annotate("text", label="***", x=1.00, y= 4.00) +
+                    annotate("text", label="***", x=2.00, y= 4.00) +
+                    annotate("text", label="***", x=1.72, y= -0.60))
+
+## Idiomaticity * Correctness
+b1 <- bracketsGrob(0.18, 0.92, 0.37, 0.92, h=0.02, lwd=1, col="black", type=1, ticks=NULL) # Literal incorrect - correct
+b2 <- bracketsGrob(0.63, 0.94, 0.82, 0.94, h=0.02,  lwd=1, col="black", type=1, ticks=NULL) # Idiomatic incorrect - correct
+b3 <- bracketsGrob(0.63, 0.19, 0.18, 0.19, h=0.02,  lwd=1, col="black", type=1, ticks=NULL) # correct literal - idiomatic
+b4 <- bracketsGrob(0.82, 0.10, 0.37, 0.10, h=0.02,  lwd=1, col="black", type=1, ticks=NULL) # incorrect literal - idiomatic
+
+### Add brackets and significance stars to plot
+(T4_IdiomCor <- ggplotT4_IdiomCor + 
+                    annotation_custom(b1) + annotation_custom(b2) + 
+                    annotation_custom(b3) + annotation_custom(b4) +
+                    annotate("text", label="***", x=1.00, y= 4.00) + # Literal incorrect - correct
+                    annotate("text", label="***", x=2.00, y= 4.12) + # Idiomatic incorrect - correct
+                    annotate("text", label="**", x=1.30, y= -0.45) + # Correct literal - idiomatic
+                    annotate("text", label="***", x=1.70, y= -0.92)) # Incorrect literal - idiomatic
+
+
+## Context * Idiomaticity
+b1 <- bracketsGrob(0.18, 0.92, 0.37, 0.92, h=0.02, lwd=1, col="black", type=1, ticks=NULL) # Neutral Literal - Idiomatic
+b2 <- bracketsGrob(0.63, 0.94, 0.82, 0.94, h=0.02,  lwd=1, col="black", type=1, ticks=NULL) # Predictive Literal - Idiomatic
+b3 <- bracketsGrob(0.63, 0.19, 0.18, 0.19, h=0.02,  lwd=1, col="black", type=1, ticks=NULL) # Literal Neutral - Predictive
+
+### Add brackets and significance stars to plot
+(T4_ContIdiom <- ggplotT4_ContIdiom + 
+                    annotation_custom(b1) + annotation_custom(b2) + 
+                    annotation_custom(b3) + 
+                    annotate("text", label="***", x=1.00, y= 4.00) + # Neutral Literal - Idiomatic
+                    annotate("text", label="***", x=2.00, y= 4.12) + # Predictive Literal - Idiomatic
+                    annotate("text", label="*", x=1.30, y= -0.45))  # Literal Neutral - Predictive
+
+### Plot the three graphs together
+(S3_intP600_withlegend <- cowplot::plot_grid(T4_SesCor + theme(legend.position="bottom"),
+                            T4_IdiomCor + theme(legend.position="bottom"),
+                            T4_ContIdiom + theme(legend.position="bottom"),
+                            ncol=3, nrow=1, align='vh'))
+
+# Save plot in different formats
+
+# ## PNG
+# ggsave(S3_intP600_withlegend, file="./Plots/Rplots/S3_intP600_withlegend.png", width=15, height=5, units="in")
+# ## TIFF
+# ggsave(S3_intP600_withlegend, file="./Plots/Rplots/S3_intP600_withlegend.tiff", width=15, height=5, units="in")
+# ## PDF
+# ggsave(S3_intP600_withlegend, file="./Plots/Rplots/S3_intP600_withlegend.pdf", width=15, height=5, units="in")
+
+```
+
+## Present interaction Session x Correctness, Idiomaticity x Correctness, and Context x Idiomaticity in lineplot
+### Load the data  
+```{r results='hide'}
+# Load data study 3
+print(load("./EEG - Final data/S3wholesegment_v3.rdat"))
+str(S3ALL) # check whether variables contain correct number of levels --> yes
+
+# Add session variable to study 3
+S3ALL$Session <- "T2"
+S3ALL$Session <- as.factor(S3ALL$Session)
+
+# Revalue subject variable study 3
+S3ALL$Subject <- revalue(S3ALL$Subject, c("IAS30005_AR"="5","IAS30009_AR"="9","IAS30010_AR"="10","IAS30016_AR"="16",
+                         "IAS30020_AR"="20","IAS30026_AR"="26","IAS30029_AR"="29","IAS30031_AR"="31",
+                         "IAS30034_AR"="34","IAS30036_AR"="36","IAS30040_AR"="40","IAS30041_AR"="41",
+                         "IAS30049_AR"="49","IAS30051_AR"="51","IAS30054_AR"="54", "IAS30057_AR"="57"))
+
+# Load data study 0
+print(load("./EEG - Final data/wholesegment.rdat"))
+str(ALL)
+ALL$Constraint <- droplevels(ALL$Constraint)
+ALL$Idiomaticity <- droplevels(ALL$Idiomaticity)
+str(ALL)
+
+# Add session variable to study 0
+ALL$Session <- "T1"
+ALL$Session <- as.factor(ALL$Session)
+
+# Revalue subject variable study 0
+ALL$Subject <- revalue(ALL$Subject, c("amtest_0001_Arf_final"="1","amtest_0005_Arf_final"="5",
+                         "amtest_0009_Arf_final"="9","amtest_0010_Arf_final"="10",
+                         "amtest_0012_Arf_final"="12","amtest_0015_Arf_final"="15",
+                         "amtest_0016_Arf_final"="16","amtest_0020_Arf_final"="20",
+                         "amtest_0023_Arf_final"="23","amtest_0025_Arf_final"="25",
+                         "amtest_0026_Arf_final"="26","amtest_0028_Arf_final"="28",
+                         "amtest_0029_Arf_final"="29","amtest_0031_Arf_final"="31",
+                         "amtest_0034_Arf_final"="34","amtest_0036_Arf_final"="36",
+                         "amtest_0040_Arf_final"="40","amtest_0041_Arf_final"="41",
+                         "amtest_0046_Arf_final"="46","amtest_0047_Arf_final"="47",
+                         "amtest_0049_Arf_final"="49","amtest_0051_Arf_final"="51",
+                         "amtest_0054_Arf_final"="54","amtest_0055_Arf_final"="55",
+                         "amtest_0057_Arf_final"="57","amtest_0003_Arf_final"="3",
+                         "amtest_0008_Arf_final"="8",
+                         "amtest_0011_Arf_final"="11","amtest_0013_Arf_final"="13",
+                         "amtest_0014_Arf_final"="14","amtest_0017_Arf_final"="17",
+                         "amtest_0018_Arf_final"="18","amtest_0021_Arf_final"="21",
+                         "amtest_0022_Arf_final"="22","amtest_0024_Arf_final"="24",
+                         "amtest_0027_Arf_final"="27","amtest_0033_Arf_final"="33",
+                         "amtest_0035_Arf_final"="35","amtest_0037_Arf_final"="37",
+                         "amtest_0038_Arf_final"="38","amtest_0039_Arf_final"="39",
+                         "amtest_0042_Arf_final"="42","amtest_0044_Arf_final"="44",
+                         "amtest_0045_Arf_final"="45","amtest_0048_Arf_final"="48",
+                         "amtest_0050_Arf_final"="50","amtest_0052_Arf_final"="52",
+                         "amtest_0053_Arf_final"="53","amtest_0056_Arf_final"="56",
+                         "amtest_0058_Arf_final"="58"))
+
+# Only select older adults study 0
+ALL.senior <- droplevels(ALL[ALL$Group == 'senior',])
+str(ALL.senior) # subject has now 25 levels --> correct
+
+# Merge the two dataframes
+names(S3ALL)
+names(ALL.senior)
+
+ALL2 <- rbind(ALL.senior, S3ALL) # 2286360 + 1610280 = 3896640 observations --> correct!
+str(ALL2) # Subject has 25 levels --> correct
+
+# Rename predictors
+ALL2 <- rename(ALL2, Context=Constraint) # rename factor to 'Context'
+ALL2 <- rename(ALL2, Correctness=TargetType) # rename factor to 'Correctness'
+ALL2$Context <- revalue(ALL2$Context, c("High"="Predictive"))
+
+# Check reference levels of factors
+contrasts(ALL2$Context)
+ALL2$Context <- relevel(ALL2$Context, "Neutral")
+
+contrasts(ALL2$Idiomaticity)
+ALL2$Idiomaticity <- relevel(ALL2$Idiomaticity, "Lit")
+
+contrasts(ALL2$Correctness)
+contrasts(ALL2$Session)
+```
+
+
+### Compute averages per session and group
+```{r}
+ALL2_agg <- ddply(ALL2, c("Session", "Group", "Timebin", "Anteriority", 
+                          "Hemisphere", "Roi", "Context", "Idiomaticity", "Correctness"), summarise,
+                          mean.mV = mean(mV, na.rm=TRUE),
+                          subj.n = length(mV[!is.na(mV)]))
+
+# check data
+str(ALL2_agg)
+range(ALL2_agg$mean.mV) # from -3.35 - +6.81
+range(ALL2_agg$Timebin) # from -15 till +119
+
+# create Time variable
+ALL2_agg$Time <- ALL2_agg$Timebin*10
+range(ALL2_agg$Time) # from -150 till 1190 --> correct
+```
+
+
+### Make dataframe for the two posterior ROIs
+
+```{r}
+
+# Posterior left
+PostLeft <- droplevels(ALL2_agg[ALL2_agg$Roi == 'post.left',])
+summary(PostLeft)
+
+# Posterior right
+PostRight <- droplevels(ALL2_agg[ALL2_agg$Roi == 'post.right',])
+summary(PostRight)
+  
+```
+
+
+## Plot interaction 500-800 ms: Context x Idiomaticity x Correctness
+### Literal sentences
+```{r, fig.width=20, fig.height=10}
+
+
+
+
+# Posterior left - Literal sentences
+(TW4LitPostLeft <- ggplot() + geom_rect(data = data.frame(xmin = 500, xmax = 800, ymin = -2.5, ymax = 5),
+            aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax), fill = "grey", alpha = 0.5) +
+  geom_line(data=PostLeft[PostLeft$Idiomaticity=="Lit",], 
+                           aes(x=Time, y=mean.mV, colour=Context, linetype=Context, size=Context)) + 
+                           scale_color_manual(values=c("black", "black")) +
+                           scale_linetype_manual(values=c("solid","dashed")) +
+                           scale_size_manual(values=c(1,1)) +
+                           scale_x_continuous(limits=c(-150, 1200), breaks=c(-150,0,200,400,600,800,1000,1200)) +
+                           scale_y_reverse(lim=c(5,-2.5), breaks=c(4,2,0,-2)) +
+                           labs(title="Posterior left\nLiteral",
+                           y="mV", x="\nTime\n") +
+                           geom_hline(yintercept=0, linetype="dotted", size=0.5) +
+                           geom_vline(xintercept=0, linetype="dotted",size=0.5) +
+                           theme_classic() +
+                           theme(plot.title=element_text(size=16, face="bold", color="black", hjust=0.5), 
+                           axis.title=element_text(size=18, face="bold", color="black"), 
+                           axis.text=element_text(size=16, face="bold", color="black"),
+                           axis.text.x=element_text(vjust=-2),
+                           legend.title=element_text(size=18, face="bold", color="black"),
+                           legend.text=element_text(size=16, face="bold", color="black"),
+                           plot.margin=margin(r=1,l=0.5, unit="cm"),
+                           legend.key=element_blank(),
+                           legend.key.width=unit(2, "cm"),
+                           legend.position="bottom", 
+                           legend.box.background=element_blank()))
+
+# Posterior right - Literal sentences
+(TW4LitPostRight <- ggplot() + geom_rect(data = data.frame(xmin = 500, xmax = 800, ymin = -2.5, ymax = 5),
+            aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax), fill = "grey", alpha = 0.5) +
+  geom_line(data=PostRight[PostRight$Idiomaticity=="Lit",], 
+                           aes(x=Time, y=mean.mV, colour=Context, linetype=Context, size=Context)) + 
+                           scale_color_manual(values=c("black", "black")) +
+                           scale_linetype_manual(values=c("solid","dashed")) +
+                           scale_size_manual(values=c(1,1)) +
+                           scale_x_continuous(limits=c(-150, 1200), breaks=c(-150,0,200,400,600,800,1000,1200)) +
+                           scale_y_reverse(lim=c(5,-2.5), breaks=c(4,2,0,-2)) +
+                           labs(title="Posterior right\nLiteral",
+                           y="mV", x="\nTime\n") +
+                           geom_hline(yintercept=0, linetype="dotted", size=0.5) +
+                           geom_vline(xintercept=0, linetype="dotted",size=0.5) +
+                           theme_classic() +
+                           theme(plot.title=element_text(size=16, face="bold", color="black", hjust=0.5), 
+                           axis.title=element_text(size=18, face="bold", color="black"), 
+                           axis.text=element_text(size=16, face="bold", color="black"),
+                           axis.text.x=element_text(vjust=-2),
+                           legend.title=element_text(size=18, face="bold", color="black"),
+                           legend.text=element_text(size=16, face="bold", color="black"),
+                           plot.margin=margin(r=1,l=0.5, unit="cm"),
+                           legend.key=element_blank(),
+                           legend.key.width=unit(2, "cm"),
+                           legend.position="bottom", 
+                           legend.box.background=element_blank()))
+
+# Posterior left - Idiomatic sentences
+(TW4IdiomPostLeft <- ggplot() + geom_rect(data = data.frame(xmin = 500, xmax = 800, ymin = -2.5, ymax = 5),
+            aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax), fill = "grey", alpha = 0.5) +
+  geom_line(data=PostLeft[PostLeft$Idiomaticity=="Idiom",], 
+                           aes(x=Time, y=mean.mV, colour=Context, linetype=Context, size=Context)) + 
+                           scale_color_manual(values=c("black", "black")) +
+                           scale_linetype_manual(values=c("solid","dashed")) +
+                           scale_size_manual(values=c(1,1)) +
+                           scale_x_continuous(limits=c(-150, 1200), breaks=c(-150,0,200,400,600,800,1000,1200)) +
+                           scale_y_reverse(lim=c(5,-2.5), breaks=c(4,2,0,-2)) +
+                           labs(title="Posterior left\nIdiomatic",
+                           y="mV", x="\nTime\n") +
+                           geom_hline(yintercept=0, linetype="dotted", size=0.5) +
+                           geom_vline(xintercept=0, linetype="dotted",size=0.5) +
+                           theme_classic() +
+                           theme(plot.title=element_text(size=16, face="bold", color="black", hjust=0.5), 
+                           axis.title=element_text(size=18, face="bold", color="black"), 
+                           axis.text=element_text(size=16, face="bold", color="black"),
+                           axis.text.x=element_text(vjust=-2),
+                           legend.title=element_text(size=18, face="bold", color="black"),
+                           legend.text=element_text(size=16, face="bold", color="black"),
+                           plot.margin=margin(r=1,l=0.5, unit="cm"),
+                           legend.key=element_blank(),
+                           legend.key.width=unit(2, "cm"),
+                           legend.position="bottom", 
+                           legend.box.background=element_blank()))
+
+# Posterior right - Literal sentences
+(TW4IdiomPostRight <- ggplot() + geom_rect(data = data.frame(xmin = 500, xmax = 800, ymin = -2.5, ymax = 5),
+            aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax), fill = "grey", alpha = 0.5) +
+  geom_line(data=PostRight[PostRight$Idiomaticity=="Idiom",], 
+                           aes(x=Time, y=mean.mV, colour=Context, linetype=Context, size=Context)) + 
+                           scale_color_manual(values=c("black", "black")) +
+                           scale_linetype_manual(values=c("solid","dashed")) +
+                           scale_size_manual(values=c(1,1)) +
+                           scale_x_continuous(limits=c(-150, 1200), breaks=c(-150,0,200,400,600,800,1000,1200)) +
+                           scale_y_reverse(lim=c(5,-2.5), breaks=c(4,2,0,-2)) +
+                           labs(title="Posterior right\nIdiomatic",
+                           y="mV", x="\nTime\n") +
+                           geom_hline(yintercept=0, linetype="dotted", size=0.5) +
+                           geom_vline(xintercept=0, linetype="dotted",size=0.5) +
+                           theme_classic() +
+                           theme(plot.title=element_text(size=16, face="bold", color="black", hjust=0.5), 
+                           axis.title=element_text(size=18, face="bold", color="black"), 
+                           axis.text=element_text(size=16, face="bold", color="black"),
+                           axis.text.x=element_text(vjust=-2),
+                           legend.title=element_text(size=18, face="bold", color="black"),
+                           legend.text=element_text(size=16, face="bold", color="black"),
+                           plot.margin=margin(r=1,l=0.5, unit="cm"),
+                           legend.key=element_blank(),
+                           legend.key.width=unit(2, "cm"),
+                           legend.position="bottom", 
+                           legend.box.background=element_blank()))
+
+# Combine plots
+## Delete legend
+TW4LitPostLeft_nolegend <- TW4LitPostLeft + theme(legend.position = "none")
+TW4LitPostRight_nolegend <- TW4LitPostRight + theme(legend.position = "none")
+TW4IdiomPostLeft_nolegend <- TW4IdiomPostLeft + theme(legend.position = "none")
+TW4IdiomPostRight_nolegend <- TW4IdiomPostRight + theme(legend.position = "none")
+
+
+# Save legend
+legendP600TW4_line2 <- get_legend(TW4LitPostLeft + theme(legend.position = "bottom", legend.justification = "top"))
+
+# Combine plots of literal and idiomatic sentences into one large plot
+(intP600_TW4_LitIdiom_line2 <- grid.arrange(TW4LitPostLeft_nolegend, TW4LitPostRight_nolegend, 
+                                           TW4IdiomPostLeft_nolegend, TW4IdiomPostRight_nolegend,
+                                        ncol=2, top=textGrob("500-800 ms\n Interaction Context * Idiomaticity",
+                                        gp=gpar(fontsize=16, fontface="bold")), bottom=legendP600TW4_line2))
+
+# Save plots
+# ggsave(intP600_TW4_LitIdiom_line2, file="./Plots/Rplots/intP600_TW4_LitIdiom_line2.png", width=20, height=20, units="in")
+# ggsave(intP600_TW4_LitIdiom_line2, file="./Plots/Rplots/intP600_TW4_LitIdiom_line2.pdf", width=20, height=20, units="in")
+# ggsave(intP600_TW4_LitIdiom_line2, file="./Plots/Rplots/intP600_TW4_LitIdiom_line2.tiff", width=20, height=20, units="in")
+```

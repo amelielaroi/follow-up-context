@@ -1,0 +1,1438 @@
+---
+title: "Analysis 300-400 ms time window"
+author: "Amélie la Roi"
+date: "May 8, 2020"
+output: html_document
+---
+
+Last update: September 2, 2020
+
+
+# Data analysis on time window 300-400 ms
+
+## Load packages
+```{r warning=FALSE, results='hide'}
+library(plyr)
+library(dplyr)
+library(lme4)
+library(lmerTest)
+library(emmeans)
+library(multcomp)
+library(effects)
+library(ggplot2)
+library(patchwork)
+library(gridExtra)
+library(grid)
+library(pBrackets)
+library(cowplot)
+
+
+```
+
+
+## Load data
+```{r} 
+# Load data study 3
+print(load("G:/Back-up Y-schijf 12.03.2020/Study 3 - Follow-up MA thesis/Data/EEG/Preprocessing data/data_300-400_v3/S3.300-400_agg_v3.rdat"))
+
+# Load data study 0
+print(load("G:/Back-up Y-schijf 12.03.2020/Study 3 - Follow-up MA thesis/Data/EEG/Preprocessing data/data_300-400/300-400_agg.rdat"))
+
+# Check variable names in dataframes
+names(S3ALL.T2_agg)
+names(all.T2_agg)
+
+# Merge data study 0 and study 3
+ALL2.T2 <- rbind(S3ALL.T2_agg, all.T2_agg) # 112880 + 338280 = 451160 observations --> correct!
+
+# Check data
+str(ALL2.T2) # Subject has 66 levels --> correct (50 (T1) + 16 (T2))
+
+```
+
+### Add session variable
+```{r}
+ALL2.T2$Session[ALL2.T2$Subject %in% c("1","5","9","10","12","15","16",
+                                  "20","23","25","26","28","29","31",
+                                  "34","36","40","41","46","47","49",
+                                  "51","54","55","57","3","8","11","13",
+                                  "14","17","18","21","22","24","27","33",
+                                  "35","37","38","39","42","44","45","48",
+                                  "50","52","53","56","58")] <- "T1"
+
+ALL2.T2$Session[ALL2.T2$Subject %in% c("IAS30005_AR","IAS30009_AR","IAS30010_AR","IAS30016_AR","IAS30020_AR",
+              "IAS30026_AR","IAS30029_AR","IAS30031_AR","IAS30034_AR","IAS30036_AR",
+              "IAS30040_AR","IAS30041_AR","IAS30049_AR","IAS30051_AR",
+              "IAS30054_AR","IAS30057_AR")] <- "T2"
+
+ALL2.T2$Session <- as.factor(ALL2.T2$Session)
+
+```
+
+
+### Tidy variables
+```{r results='hide'}
+# Rename subject variable study 3
+ALL2.T2$Subject <- revalue(ALL2.T2$Subject, c("IAS30005_AR"="5","IAS30009_AR"="9","IAS30010_AR"="10","IAS30016_AR"="16",
+                         "IAS30020_AR"="20","IAS30026_AR"="26","IAS30029_AR"="29","IAS30031_AR"="31",
+                         "IAS30034_AR"="34","IAS30036_AR"="36","IAS30040_AR"="40","IAS30041_AR"="41",
+                         "IAS30049_AR"="49","IAS30051_AR"="51","IAS30054_AR"="54", "IAS30057_AR"="57"))
+
+#check data
+str(ALL2.T2) # Subject variable has 50 levels --> correct
+
+# Only select data older adults
+ALL3.T2 <- droplevels(ALL2.T2[ALL2.T2$Group == 'senior',])
+
+# Check data
+str(ALL3.T2) # Subject variable has 25 levels --> correct
+
+# check dummy coding and relevel if necessary
+contrasts(ALL3.T2$Session)
+
+# check Context factor
+ALL3.T2 <- rename(ALL3.T2, Context=Constraint) # rename factor to 'Context'
+contrasts(ALL3.T2$Context)
+ALL3.T2$Context <- relevel(ALL3.T2$Context, "Neutral")
+ALL3.T2$Context <- revalue(ALL3.T2$Context, c("High"="Predictive")) # rename factor level 'High' to 'Predictive'
+contrasts(ALL3.T2$Context)
+
+# Check Idiomaticity factor
+contrasts(ALL3.T2$Idiomaticity)
+ALL3.T2$Idiomaticity <- relevel(ALL3.T2$Idiomaticity, "Lit")
+
+# Check Correctness factor
+ALL3.T2 <- rename(ALL3.T2, Correctness=Condition)
+contrasts(ALL3.T2$Correctness)
+
+# Check dataframe
+head(ALL3.T2)
+summary(ALL3.T2)
+str(ALL3.T2)
+```
+
+
+# Create dataset for analysis
+```{r results='hide'}
+# Compute mean voltage over session, group, the 8 experimental conditions, and the 4 ROIs
+ALL3.T2_agg <- ddply(ALL3.T2, c("Subject", "Session", "Group", "Context", "Idiomaticity", "Correctness", 
+                                "TrialNr", "Target", "Anteriority", "Hemisphere", "ROI"), summarise, 
+                                mean.mV = mean(mV, na.rm=TRUE),
+                                subj.n = length(mV[!is.na(mV)]))
+
+str(ALL3.T2_agg)
+summary(ALL3.T2_agg)
+
+# Only select posterior ROIs
+ALL3.T2_post1 <- droplevels(ALL3.T2_agg[ALL3.T2_agg$Anteriority == 'post',])
+str(ALL3.T2_post1)
+summary(ALL3.T2_post1)
+
+# Load VF data
+print(load("G:/Back-up Y-schijf 12.03.2020/Study 3 - Follow-up MA thesis/Data/Cognitive tasks/Verbal fluency/S0S3_VF_final.rdat"))
+
+# Remove redundant columns
+VF_final <- subset(VF4, select=c(Subject, Session, Cat.c, Let.c, Total.c))
+
+# Merge VF scores with EEG data
+ALL3.T2_post <- merge(ALL3.T2_post1, VF_final, by=c("Subject", "Session"))
+summary(ALL3.T2_post)
+
+```
+
+
+# Test for general longitudinal effects in the N400
+```{r results='hide'}
+# Average mean voltages over Context and Idiomaticity
+ALL3.T2_N400 <- ddply(ALL3.T2_post, c("Subject", "Session", "Group", "Correctness", "TrialNr", "Target", "Anteriority", "Hemisphere", "ROI"), summarise, mean.mV = mean(mean.mV, na.rm=TRUE))
+
+# Only select posterior ROIs
+T2N400_post <- droplevels(ALL3.T2_N400[ALL3.T2_N400$Anteriority=='post',])
+
+# Fit model on general N400 effect in baseline and follow-up session
+m0.T2 <- lmer(mean.mV ~ Session * Correctness + Hemisphere + (1|Subject) + (1|Target), data=T2N400_post, control=lmerControl(optimizer="Nelder_Mead"), REML=F)
+summary(m0.T2) # No interaction between Session * Correctness, so general N400 effect doesn't seem to change over time
+
+# Compute contrasts
+(T2_contrastN400_Correctness <- lsmeans(m0.T2, pairwise ~ Correctness|Session))
+(T2_contrastN400_Session <- lsmeans(m0.T2, pairwise ~ Session|Correctness)) # incorrect significantly less negative at follow-up compared with baseline
+
+# Change reference level of correctness to facilitate interpretation of planned comparisons on N400 effect
+contrasts(T2N400_post$Correctness)
+T2N400_post$Correctness <- relevel(T2N400_post$Correctness, "incorrect")
+
+# Fit model again with relevel factor
+m0a.T2 <- lmer(mean.mV ~ Session * Correctness + Hemisphere + (1|Subject) + (1|Target), data=T2N400_post, control=lmerControl(optimizer="Nelder_Mead"), REML=F)
+summary(m0a.T2)
+
+(T2_contrastN400_Correctness_v2 <- lsmeans(m0a.T2, pairwise ~ Correctness|Session))
+(T2_contrastN400_Session_v2 <- lsmeans(m0a.T2, pairwise ~ Session|Correctness))
+
+m0b.T2 <- lmer(mean.mV ~ Session + Correctness + Hemisphere + (1|Subject) + (1|Target), data=T2N400_post, control=lmerControl(optimizer="Nelder_Mead"), REML=F)
+anova(m0a.T2, m0b.T2)
+AIC(m0b.T2)-AIC(m0a.T2) # -0.91
+
+summary(m0b.T2)
+
+```
+
+## Plot general longitudinal effects in the N400 effect
+
+# Plot N400 effect in barplot
+```{r}
+
+# Compute mean voltage for correct and incorrect target words in baseline and follow-up session
+plot_m0.T2 <- allEffects(m0.T2)
+plot_m0.T2 # print effects
+
+# Save interaction effect of the model in a dataframe
+## 300-400 ms
+T2intN400 <- plot_m0.T2[[2]] # save the interaction effect
+T2intN400.df <- as.data.frame(T2intN400) # convert into dataframe
+
+# Rename factor levels Session
+levels(T2intN400.df$Session)[levels(T2intN400.df$Session)=="T1"] <- "Baseline"
+levels(T2intN400.df$Session)[levels(T2intN400.df$Session)=="T2"] <- "Follow-up"
+contrasts(T2intN400.df$Session)
+
+# Make barplot
+(TW2_N400_bar <- ggplot(data=T2intN400.df, aes(x=Session, y=fit, fill=Correctness)) +
+  geom_bar(stat="identity", position=position_dodge(), colour="black", size=1) +
+  scale_fill_grey() + coord_cartesian(ylim=c(-1,4)) + scale_y_continuous(breaks=seq(-1,4,1)) +
+  background_grid(major='none', minor="none") + labs(x=NULL, y="\nFitted values mV") +
+  ggtitle("\n300-400 ms") + theme_classic() +
+  theme(plot.title=element_text(size= 24, color="black", face="bold", hjust=0.5),
+  axis.title.y=element_text(size=32, color="black", face="bold"), axis.text=element_text(size=28, color="black", face="bold"), axis.line=element_line(size=1), axis.ticks = element_line(size=1), axis.ticks.length = unit(0.3,"cm"), 
+  legend.text=element_text(size=24, color="black"), legend.title=element_text(size=28, color="black", face="bold"),
+  legend.position="bottom",
+  plot.margin=margin(r=1, l=1, unit="cm"), panel.grid.major.y=element_blank())+
+  geom_errorbar(aes(ymin=fit-se, ymax=fit+se), width=0.2, position=position_dodge(0.9)))
+
+
+# Save plot
+# ggsave(TW2_N400_bar, file="./Plots/Rplots/TW2_N400_bar.png", width=10, height=10, units="in")
+# ggsave(TW2_N400_bar, file="./Plots/Rplots/TW2_N400_bar.pdf", width=10, height=10, units="in")
+# ggsave(TW2_N400_bar, file="./Plots/Rplots/TW2_N400_bar.tiff", width=10, height=10, units="in")
+
+```
+
+
+## Prepare data for plotting N400 effects and P600 effects in lineplot
+### Load the data  
+```{r results='hide'}
+# Load data study 3
+print(load("./EEG - Final data/S3wholesegment_v3.rdat"))
+str(S3ALL) # check whether variables contain correct number of levels --> yes
+
+# Add session variable to study 3
+S3ALL$Session <- "T2"
+S3ALL$Session <- as.factor(S3ALL$Session)
+
+# Revalue subject variable study 3
+S3ALL$Subject <- revalue(S3ALL$Subject, c("IAS30005_AR"="5","IAS30009_AR"="9","IAS30010_AR"="10","IAS30016_AR"="16",
+                         "IAS30020_AR"="20","IAS30026_AR"="26","IAS30029_AR"="29","IAS30031_AR"="31",
+                         "IAS30034_AR"="34","IAS30036_AR"="36","IAS30040_AR"="40","IAS30041_AR"="41",
+                         "IAS30049_AR"="49","IAS30051_AR"="51","IAS30054_AR"="54", "IAS30057_AR"="57"))
+
+# Load data study 0
+print(load("./EEG - Final data/wholesegment.rdat"))
+str(ALL)
+ALL$Constraint <- droplevels(ALL$Constraint)
+ALL$Idiomaticity <- droplevels(ALL$Idiomaticity)
+str(ALL)
+
+# Add session variable to study 0
+ALL$Session <- "T1"
+ALL$Session <- as.factor(ALL$Session)
+
+# Revalue subject variable study 0
+ALL$Subject <- revalue(ALL$Subject, c("amtest_0001_Arf_final"="1","amtest_0005_Arf_final"="5",
+                         "amtest_0009_Arf_final"="9","amtest_0010_Arf_final"="10",
+                         "amtest_0012_Arf_final"="12","amtest_0015_Arf_final"="15",
+                         "amtest_0016_Arf_final"="16","amtest_0020_Arf_final"="20",
+                         "amtest_0023_Arf_final"="23","amtest_0025_Arf_final"="25",
+                         "amtest_0026_Arf_final"="26","amtest_0028_Arf_final"="28",
+                         "amtest_0029_Arf_final"="29","amtest_0031_Arf_final"="31",
+                         "amtest_0034_Arf_final"="34","amtest_0036_Arf_final"="36",
+                         "amtest_0040_Arf_final"="40","amtest_0041_Arf_final"="41",
+                         "amtest_0046_Arf_final"="46","amtest_0047_Arf_final"="47",
+                         "amtest_0049_Arf_final"="49","amtest_0051_Arf_final"="51",
+                         "amtest_0054_Arf_final"="54","amtest_0055_Arf_final"="55",
+                         "amtest_0057_Arf_final"="57","amtest_0003_Arf_final"="3",
+                         "amtest_0008_Arf_final"="8",
+                         "amtest_0011_Arf_final"="11","amtest_0013_Arf_final"="13",
+                         "amtest_0014_Arf_final"="14","amtest_0017_Arf_final"="17",
+                         "amtest_0018_Arf_final"="18","amtest_0021_Arf_final"="21",
+                         "amtest_0022_Arf_final"="22","amtest_0024_Arf_final"="24",
+                         "amtest_0027_Arf_final"="27","amtest_0033_Arf_final"="33",
+                         "amtest_0035_Arf_final"="35","amtest_0037_Arf_final"="37",
+                         "amtest_0038_Arf_final"="38","amtest_0039_Arf_final"="39",
+                         "amtest_0042_Arf_final"="42","amtest_0044_Arf_final"="44",
+                         "amtest_0045_Arf_final"="45","amtest_0048_Arf_final"="48",
+                         "amtest_0050_Arf_final"="50","amtest_0052_Arf_final"="52",
+                         "amtest_0053_Arf_final"="53","amtest_0056_Arf_final"="56",
+                         "amtest_0058_Arf_final"="58"))
+
+# Only select older adults study 0
+ALL.senior <- droplevels(ALL[ALL$Group == 'senior',])
+str(ALL.senior) # subject has now 25 levels --> correct
+
+# Merge the two dataframes
+names(S3ALL)
+names(ALL.senior)
+
+ALL2 <- rbind(ALL.senior, S3ALL) # 2286360 + 1610280 = 3896640 observations --> correct!
+str(ALL2) # Subject has 25 levels --> correct
+
+# Rename predictors
+ALL2 <- rename(ALL2, Context=Constraint) # rename factor to 'Context'
+ALL2 <- rename(ALL2, Correctness=TargetType) # rename factor to 'Correctness'
+ALL2$Context <- revalue(ALL2$Context, c("High"="Predictive"))
+
+# Check reference levels of factors
+contrasts(ALL2$Context)
+ALL2$Context <- relevel(ALL2$Context, "Neutral")
+
+contrasts(ALL2$Idiomaticity)
+ALL2$Idiomaticity <- relevel(ALL2$Idiomaticity, "Lit")
+
+contrasts(ALL2$Correctness)
+contrasts(ALL2$Session)
+```
+
+
+### Compute averages per session and group
+```{r}
+ALL2_agg <- ddply(ALL2, c("Session", "Group", "Timebin", "Anteriority", 
+                          "Hemisphere", "Roi", "Context", "Idiomaticity", "Correctness"), summarise,
+                          mean.mV = mean(mV, na.rm=TRUE),
+                          subj.n = length(mV[!is.na(mV)]))
+
+# check data
+str(ALL2_agg)
+range(ALL2_agg$mean.mV) # from -3.35 - +6.81
+range(ALL2_agg$Timebin) # from -15 till +119
+
+# create Time variable
+ALL2_agg$Time <- ALL2_agg$Timebin*10
+range(ALL2_agg$Time) # from -150 till 1190 --> correct
+```
+
+
+### Make dataframe for the two posterior ROIs
+
+```{r}
+
+# Posterior left
+PostLeft <- droplevels(ALL2_agg[ALL2_agg$Roi == 'post.left',])
+summary(PostLeft)
+
+# Posterior right
+PostRight <- droplevels(ALL2_agg[ALL2_agg$Roi == 'post.right',])
+summary(PostRight)
+
+
+
+## Average mean voltages over Context and Idiomaticity
+PostLeft_N400 <- ddply(PostLeft, c("Group", "Time", "Hemisphere", "Session", "Correctness"), summarise,
+                          mean.mV = mean(mean.mV, na.rm=TRUE))
+
+PostRight_N400 <- ddply(PostRight, c("Group", "Time", "Hemisphere", "Session", "Correctness"), summarise,
+                          mean.mV = mean(mean.mV, na.rm=TRUE))
+  
+```
+
+
+# Plot N400 effects and P600 effects in line plots
+```{r}
+# Posterior left - Baseline
+(PostLeftT1 <- ggplot() + geom_rect(data = data.frame(xmin = 300, xmax = 400, ymin = -2.5, ymax = 7),
+            aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax), fill="green", colour="black", size=0.75, linetype="dotted", alpha = 0.5) +
+   geom_rect(data = data.frame(xmin = 400, xmax = 500, ymin = -2.5, ymax = 7),
+            aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax), fill="green", colour="black", size=0.75, linetype="dotted", alpha = 0.5) +
+   geom_rect(data = data.frame(xmin = 500, xmax = 800, ymin = -2.5, ymax = 7),
+            aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax), fill="red", colour="black", size=0.75, linetype="dotted", alpha = 0.35) +
+  geom_line(data=PostLeft_N400[PostLeft_N400$Session =="T1",], 
+                           aes(x=Time, y=mean.mV, colour=Correctness, linetype=Correctness, size=Correctness)) + 
+                           scale_color_manual(values=c("black", "black")) +
+                           scale_linetype_manual(values=c("solid","dashed")) +
+                           scale_size_manual(values=c(1,1)) +
+                           scale_x_continuous(limits=c(-150, 1200), breaks=c(-150,0,200,400,600,800,1000,1200)) +
+                           scale_y_reverse(lim=c(7,-2.5), breaks=c(6,4,2,0,-2)) +
+                           labs(title="Baseline\nPosterior left",
+                           y="mV", x="\nTime\n") +
+                           geom_hline(yintercept=0, linetype="dotted", size=0.5) +
+                           geom_vline(xintercept=0, linetype="dotted",size=0.5) +
+                           theme_classic() +
+                           theme(plot.title=element_text(size=24, face="bold", color="black", hjust=0.5), 
+                           axis.title=element_text(size=24, face="bold", color="black"), 
+                           axis.text=element_text(size=20, face="bold", color="black"),
+                           axis.text.x=element_text(vjust=-2),
+                           axis.ticks = element_line(size=1), axis.ticks.length = unit(0.3,"cm"), 
+                           legend.title=element_text(size=24, face="bold", color="black"),
+                           legend.text=element_text(size=22, face="bold", color="black"),
+                           plot.margin=margin(r=1,l=0.5, unit="cm"),
+                           legend.key=element_blank(),
+                           legend.key.width=unit(2, "cm"),
+                           legend.position="bottom", 
+                           legend.box.background=element_blank()))
+
+# Posterior right - Baseline
+(PostRightT1 <- ggplot() + geom_rect(data = data.frame(xmin = 300, xmax = 400, ymin = -2.5, ymax = 7),
+            aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax), fill="green", colour="black", size=0.75, linetype="dotted", alpha = 0.5) +
+   geom_rect(data = data.frame(xmin = 400, xmax = 500, ymin = -2.5, ymax = 7),
+            aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax), fill="green", colour="black", size=0.75, linetype="dotted", alpha = 0.5) +
+   geom_rect(data = data.frame(xmin = 500, xmax = 800, ymin = -2.5, ymax = 7),
+            aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax), fill="red", colour="black", size=0.75, linetype="dotted", alpha = 0.35) +
+  geom_line(data=PostRight_N400[PostRight_N400$Session =="T1",], 
+                           aes(x=Time, y=mean.mV, colour=Correctness, linetype=Correctness, size=Correctness)) + 
+                           scale_color_manual(values=c("black", "black")) +
+                           scale_linetype_manual(values=c("solid","dashed")) +
+                           scale_size_manual(values=c(1,1)) +
+                           scale_x_continuous(limits=c(-150, 1200), breaks=c(-150,0,200,400,600,800,1000,1200)) +
+                           scale_y_reverse(lim=c(7,-2.5), breaks=c(6,4,2,0,-2)) +
+                           labs(title="Baseline\nPosterior right",
+                           y="mV", x="\nTime\n") +
+                           geom_hline(yintercept=0, linetype="dotted", size=0.5) +
+                           geom_vline(xintercept=0, linetype="dotted",size=0.5) +
+                           theme_classic() +
+                           theme(plot.title=element_text(size=24, face="bold", color="black", hjust=0.5), 
+                           axis.title=element_text(size=24, face="bold", color="black"), 
+                           axis.text=element_text(size=20, face="bold", color="black"),
+                           axis.text.x=element_text(vjust=-2),
+                           axis.ticks = element_line(size=1), axis.ticks.length = unit(0.3,"cm"), 
+                           legend.title=element_text(size=24, face="bold", color="black"),
+                           legend.text=element_text(size=22, face="bold", color="black"),
+                           plot.margin=margin(r=1,l=0.5, unit="cm"),
+                           legend.key=element_blank(),
+                           legend.key.width=unit(2, "cm"),
+                           legend.position="bottom", 
+                           legend.box.background=element_blank()))
+
+# Posterior left - Follow-up
+(PostLeftT2 <- ggplot() + geom_rect(data = data.frame(xmin = 300, xmax = 400, ymin = -2.5, ymax = 7),
+            aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax), fill="green", colour="black", size=0.75, linetype="dotted", alpha = 0.5) +
+   geom_rect(data = data.frame(xmin = 400, xmax = 500, ymin = -2.5, ymax = 7),
+            aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax), fill="green", colour="black", size=0.75, linetype="dotted", alpha = 0.5) +
+   geom_rect(data = data.frame(xmin = 500, xmax = 800, ymin = -2.5, ymax = 7),
+            aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax), fill="red", colour="black", size=0.75, linetype="dotted", alpha = 0.35) +
+  geom_line(data=PostLeft_N400[PostLeft_N400$Session =="T2",], 
+                           aes(x=Time, y=mean.mV, colour=Correctness, linetype=Correctness, size=Correctness)) + 
+                           scale_color_manual(values=c("black", "black")) +
+                           scale_linetype_manual(values=c("solid","dashed")) +
+                           scale_size_manual(values=c(1,1)) +
+                           scale_x_continuous(limits=c(-150, 1200), breaks=c(-150,0,200,400,600,800,1000,1200)) +
+                           scale_y_reverse(lim=c(7,-2.5), breaks=c(6,4,2,0,-2)) +
+                           labs(title="Follow-up\nPosterior left",
+                           y="mV", x="\nTime\n") +
+                           geom_hline(yintercept=0, linetype="dotted", size=0.5) +
+                           geom_vline(xintercept=0, linetype="dotted",size=0.5) +
+                           theme_classic() +
+                           theme(plot.title=element_text(size=24, face="bold", color="black", hjust=0.5), 
+                           axis.title=element_text(size=24, face="bold", color="black"), 
+                           axis.text=element_text(size=20, face="bold", color="black"),
+                           axis.text.x=element_text(vjust=-2),
+                           axis.ticks = element_line(size=1), axis.ticks.length = unit(0.3,"cm"), 
+                           legend.title=element_text(size=24, face="bold", color="black"),
+                           legend.text=element_text(size=22, face="bold", color="black"),
+                           plot.margin=margin(r=1,l=0.5, unit="cm"),
+                           legend.key=element_blank(),
+                           legend.key.width=unit(2, "cm"),
+                           legend.position="bottom", 
+                           legend.box.background=element_blank()))
+
+# Posterior right - Follow-up
+(PostRightT2 <- ggplot() + geom_rect(data = data.frame(xmin = 300, xmax = 400, ymin = -2.5, ymax = 7),
+            aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax), fill="green", colour="black", size=0.75, linetype="dotted", alpha = 0.5) +
+   geom_rect(data = data.frame(xmin = 400, xmax = 500, ymin = -2.5, ymax = 7),
+            aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax), fill="green", colour="black", size=0.75, linetype="dotted", alpha = 0.5) +
+   geom_rect(data = data.frame(xmin = 500, xmax = 800, ymin = -2.5, ymax = 7),
+            aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax), fill="red", colour="black", size=0.75, linetype="dotted", alpha = 0.35) +
+  geom_line(data=PostRight_N400[PostRight_N400$Session =="T2",], 
+                           aes(x=Time, y=mean.mV, colour=Correctness, linetype=Correctness, size=Correctness)) + 
+                           scale_color_manual(values=c("black", "black")) +
+                           scale_linetype_manual(values=c("solid","dashed")) +
+                           scale_size_manual(values=c(1,1)) +
+                           scale_x_continuous(limits=c(-150, 1200), breaks=c(-150,0,200,400,600,800,1000,1200)) +
+                           scale_y_reverse(lim=c(7,-2.5), breaks=c(6,4,2,0,-2)) +
+                           labs(title="Follow-up\nPosterior right",
+                           y="mV", x="\nTime\n") +
+                           geom_hline(yintercept=0, linetype="dotted", size=0.5) +
+                           geom_vline(xintercept=0, linetype="dotted",size=0.5) +
+                           theme_classic() +
+                           theme(plot.title=element_text(size=24, face="bold", color="black", hjust=0.5), 
+                           axis.title=element_text(size=24, face="bold", color="black"), 
+                           axis.text=element_text(size=20, face="bold", color="black"),
+                           axis.text.x=element_text(vjust=-2),
+                           axis.ticks = element_line(size=1), axis.ticks.length = unit(0.3,"cm"), 
+                           legend.title=element_text(size=24, face="bold", color="black"),
+                           legend.text=element_text(size=22, face="bold", color="black"),
+                           plot.margin=margin(r=1,l=0.5, unit="cm"),
+                           legend.key=element_blank(),
+                           legend.key.width=unit(2, "cm"),
+                           legend.position="bottom", 
+                           legend.box.background=element_blank()))
+
+# Combine plots
+## Delete legend
+PostLeftT1_nolegend <- PostLeftT1 + theme(legend.position = "none")
+PostRightT1_nolegend <- PostRightT1 + theme(legend.position = "none")
+PostLeftT2_nolegend <- PostLeftT2 + theme(legend.position = "none")
+PostRightT2_nolegend <- PostRightT2 + theme(legend.position = "none")
+
+# Save legend
+legendT1T2_line <- get_legend(PostLeftT1 + theme(legend.position = "bottom", legend.justification = "top"))
+
+# Make one plot
+(intN400P600_T1T2 <- grid.arrange(PostLeftT1_nolegend, PostRightT1_nolegend,
+                                 PostLeftT2_nolegend, PostRightT2_nolegend,
+                                        ncol=2, top=textGrob("General N400 effects & P600 effects",
+                                        gp=gpar(fontsize=28, fontface="bold")), bottom=legendT1T2_line))
+
+# Save plots
+# ggsave(intN400P600_T1T2, file="./Plots/Rplots/intN400P600_T1T2.png", width=20, height=15, units="in")
+# ggsave(intN400P600_T1T2, file="./Plots/Rplots/intN400P600_T1T2.pdf", width=20, height=15, units="in")
+# ggsave(intN400P600_T1T2, file="./Plots/Rplots/intN400P600_T1T2.tiff", width=20, height=15, units="in")
+```
+
+
+# Model fitting
+## Start with full model with by-Subject and by-Target(=item) random intercepts
+```{r}
+m1.T2 <- lmer(mean.mV ~ Session * Context * Idiomaticity * Correctness + (1|Subject) + (1|Target), data=ALL3.T2_post, control=lmerControl(optimizer="bobyqa"), REML=F)
+summary(m1.T2) # significant interaction Session*Context*Idiomaticity; trend for Context*Correctness
+```
+
+## Remove Correctness from 4-way interaction
+```{r}
+m2.T2 <- lmer(mean.mV ~ Session * Idiomaticity * Context + Correctness + (1|Subject) + (1|Target), data=ALL3.T2_post, control=lmerControl(optimizer="bobyqa"), REML=F)
+summary(m2.T2) # no significant interactions
+AIC(m2.T2)-AIC(m1.T2) # no significant AIC difference (1.76)
+anova(m2.T2, m1.T2) # 4-way interaction significantly improves model fit --> keep in 4-way interaction
+```
+
+## Remove Context from 4-way interaction
+```{r}
+m3.T2 <- lmer(mean.mV ~ Session * Idiomaticity * Correctness + Context + (1|Subject) + (1|Target), data=ALL3.T2_post, control=lmerControl(optimizer="bobyqa"), REML=F)
+summary(m3.T2) # no significant interactions
+AIC(m3.T2) - AIC(m1.T2) # model with 4-way interaction has lower AIC
+anova(m3.T2, m1.T2) # 4-way interaction significantly improves model fit
+```
+
+## Remove Idiomaticity from 4-way interaction
+```{r}
+m4.T2 <- lmer(mean.mV ~ Session * Context * Correctness + Idiomaticity + (1|Subject) + (1|Target), data=ALL3.T2_post, control=lmerControl(optimizer="bobyqa"), REML=F)
+summary(m4.T2)
+AIC(m4.T2)-AIC(m1.T2) # model with 4-way interaction has lower AIC
+anova(m4.T2, m1.T2) # 4-way interaction significantly improves model fit
+```
+
+## Remove Session from interaction
+```{r}
+m5.T2 <- lmer(mean.mV ~ Session + Context * Idiomaticity * Correctness + (1|Subject) + (1|Target), data=ALL3.T2_post, control=lmerControl(optimizer="bobyqa"), REML=F)
+summary(m5.T2) # significant interaction Context * Idiomaticity * Correctness; main effect of Session
+AIC(m5.T2) - AIC(m1.T2) # model with 3-way interaction has lower AIC
+anova(m5.T2, m1.T2) # 4-way interaction doesn't significantly improve model fit
+
+```
+
+## Remove Context from 3-way interaction
+```{r}
+m6.T2 <- lmer(mean.mV ~ Session + Context + Idiomaticity * Correctness + (1|Subject) + (1|Target), data=ALL3.T2_post, control=lmerControl(optimizer="bobyqa"), REML=F)
+summary(m6.T2) # no significant interaction
+AIC(m6.T2) - AIC(m5.T2) # model with 3-way interaction has lower AIC
+anova(m5.T2, m6.T2) # 3-way interaction significantly improves model fit
+
+```
+
+## Remove Idiomaticity from 3-way interaction
+```{r}
+m7.T2 <- lmer(mean.mV ~ Session + Idiomaticity + Context * Correctness + (1|Subject) + (1|Target), data=ALL3.T2_post, control=lmerControl(optimizer="bobyqa"), REML=F)
+summary(m7.T2) # no significant interaction
+AIC(m7.T2) - AIC(m5.T2) # model with 3-way interaction has lower AIC
+anova(m5.T2, m7.T2) # 3-way interaction significantly improves model fit
+```
+
+## Remove Correctness from 3-way interaction
+```{r}
+m8.T2 <- lmer(mean.mV ~ Session + Correctness + Context * Idiomaticity + (1|Subject) + (1|Target), data=ALL3.T2_post, control=lmerControl(optimizer="bobyqa"), REML=F)
+summary(m8.T2) # no significant interaction
+AIC(m8.T2) - AIC(m5.T2) # model with 3-way interaction has lower AIC
+anova(m5.T2, m8.T2) # 3-way interaction significantly improves model fit
+```
+
+
+### BEST MODEL SO FAR: m5.T2 
+
+## Test effect of hemisphere
+```{r}
+# Test effect Hemisphere
+m9.T2 <- lmer(mean.mV ~ Session + Context * Idiomaticity * Correctness + Hemisphere + (1|Subject) + (1|Target), data=ALL3.T2_post, control=lmerControl(optimizer="bobyqa"), REML=F)
+summary(m9.T2) # Hemisphere is not significant
+AIC(m9.T2)-AIC(m5.T2) # no AIC difference
+anova(m9.T2, m5.T2) # including Hemisphere does not improve model fit, but leave in for clarity
+```
+
+## Add random slopes
+```{r}
+# Add random slope for Idiomaticity per Subject
+m10.T2 <- lmer(mean.mV ~ Session + Context * Idiomaticity * Correctness + Hemisphere + (1+Idiomaticity|Subject) + (1|Target), data=ALL3.T2_post, control=lmerControl(optimizer="bobyqa"), REML=T)
+summary(m10.T2)
+
+# Fit model with REML=T to compare to random slope model
+m9a.T2 <- lmer(mean.mV ~ Session + Context * Idiomaticity * Correctness + Hemisphere + (1|Subject) + (1|Target), data=ALL3.T2_post, control=lmerControl(optimizer="bobyqa"), REML=T)
+
+anova(m9a.T2, m10.T2) # model with random slope is significantly better
+
+# Add random slope for Context per Target
+m11.T2 <- lmer(mean.mV ~ Session + Context * Idiomaticity * Correctness + Hemisphere + (1+Idiomaticity|Subject) + (1+Context|Target), data=ALL3.T2_post, control=lmerControl(optimizer="Nelder_Mead"), REML=T)
+summary(m11.T2)
+
+anova(m10.T2, m11.T2) # model with both random slopes is significantly better
+
+```
+
+
+## Test effect Verbal fluency
+```{r}
+
+# Fit m8.T2 with REML=F to enable model comparison
+m11a.T2 <- lmer(mean.mV ~ Session + Context * Idiomaticity * Correctness + Hemisphere + (1+Idiomaticity|Subject) + (1+Context|Target), data=ALL3.T2_post, control=lmerControl(optimizer="nlminbwrap"), REML=F)
+
+# Test effect category fluency
+m12.T2 <- lmer(mean.mV ~ Session + Context * Idiomaticity * Correctness + Hemisphere + Cat.c + (1+Idiomaticity|Subject) + (1+Context|Target), data=ALL3.T2_post, control=lmerControl(optimizer="nlminbwrap"), REML=F)
+summary(m12.T2)# Category fluency is not significant
+AIC(m12.T2)-AIC(m11a.T2) # no difference in AIC
+anova(m12.T2, m11a.T2) # inclusion of category fluency doesn't sigificantly improve model fit
+
+# Test effect letter fluency
+m13.T2 <- lmer(mean.mV ~ Session + Context * Idiomaticity * Correctness + Hemisphere + Let.c + (1+Idiomaticity|Subject) + (1+Context|Target), data=ALL3.T2_post, control=lmerControl(optimizer="nlminbwrap"), REML=F)
+summary(m13.T2)# Letter fluency is not significant
+AIC(m11a.T2)-AIC(m13.T2) # no difference in AIC
+anova(m11a.T2, m13.T2) # inclusion of letter fluency doesn't sigificantly improve model fit
+
+```
+
+
+
+# BEST MODEL SO FAR: m11.T2 
+
+
+## Check distribution of residuals and trim model if needed
+## Use model with interaction to check if interaction comes out after outliers have been removed
+```{r}
+qqnorm(resid(m11.T2))
+qqline(resid(m11.T2)) # skewed distribution, some extreme outliers
+plot(fitted(m11.T2), resid(m11.T2)) # some extreme outliers
+hist(resid(m11.T2)) # looks pretty normal, except for few extreme outliers
+
+## trim data
+ALL3.T2_post.trim <- ALL3.T2_post[abs(scale(resid(m11.T2))) < 2.5, ]
+
+## save trimmed data
+save(ALL3.T2_post.trim, file="./EEG - Final data/ALL3.T2_post.trim.rdat" )
+
+## fit model with trimmed data
+m11b.T2 <- lmer(mean.mV ~ Session + Context * Idiomaticity * Correctness + Hemisphere + (1+Idiomaticity|Subject) + (1+Context|Target), data=ALL3.T2_post.trim, control=lmerControl(optimizer="nlminbwrap"), REML=T)
+summary(m11b.T2) # 3-way interaction is still significant
+
+## check how much data was removed
+(noutliers <- sum(abs(scale(resid(m11.T2))) >= 2.5))
+noutliers/nrow(ALL3.T2_post) # only 1.8 % of the data was removed
+
+## check change in correlation between observed and fitted values after trimming the data
+cor(ALL3.T2_post$mean.mV, fitted(m11.T2))^2 # is 0.148
+cor(ALL3.T2_post.trim$mean.mV, fitted(m11b.T2))^2 # increased to 0.164
+
+## check distribution of residuals after trimming
+qqnorm(resid(m11b.T2))
+qqline(resid(m11b.T2)) # better distribution
+plot(fitted(m11b.T2), resid(m11b.T2)) # better
+hist(resid(m11b.T2)) # looks normal
+```
+
+# Final model: m11b.T2 (for summmary of coefficients final model set REML to TRUE)
+
+## To get insight in the direction of the interactions between Context x Idiomaticity x Correctness, calculate contrasts
+```{r}
+# 3-way interaction
+(T2_contrast_Correctness <- lsmeans(m11b.T2, pairwise ~ Correctness|Context|Idiomaticity)) # incorrect more negative than correct in all conditions
+
+(T2_contrast_Idiom <- lsmeans(m11b.T2, pairwise ~ Idiomaticity|Correctness|Context)) # Idiom significantly more positive than Lit in Neutral correct and in Predictive incorrect
+
+(T2_contrast_Context <- lsmeans(m11b.T2, pairwise ~ Context|Idiomaticity|Correctness)) # Predictive significantly more positive than Neutral only in Lit correct
+
+
+# visualize interaction
+lsmip(m11b.T2, Correctness ~ Idiomaticity|Context) 
+
+lsmip(m11b.T2, Idiomaticity ~ Correctness|Context) # shows effect of Idiomaticity
+
+lsmip(m11b.T2, Context ~ Correctness|Idiomaticity) # shows context effect in Lit correct
+```
+
+## Change reference of Correctness to make contrast more interpretable
+```{r}
+ALL3.T2_post.trim$Correctness <- relevel(ALL3.T2_post.trim$Correctness, "incorrect")
+
+# Fit model again with releveled factor
+m11c.T2 <- lmer(mean.mV ~ Session + Context * Idiomaticity * Correctness + Hemisphere + (1+Idiomaticity|Subject) + (1+Context|Target), data=ALL3.T2_post.trim, control=lmerControl(optimizer="nlminbwrap"), REML=T)
+
+# Compute contrast again
+(T2_contrast_Correctness <- lsmeans(m11c.T2, pairwise ~ Correctness|Context|Idiomaticity))
+
+# Set reference level Correctness back to "correct"
+ALL3.T2_post.trim$Correctness <- relevel(ALL3.T2_post.trim$Correctness, "correct")
+```
+
+### Save final model
+```{r}
+
+save(m11b.T2, file="./EEG - Final data/m11b.T2.rdat")
+
+```
+
+
+## Present interaction Context x Idiomaticity x Correctness in barplot
+```{r, fig.height=5, fig.width=10}
+# Save effects for the model
+
+## 300-400 ms
+plot_m11b.T2 <- allEffects(m11b.T2)
+plot_m11b.T2 # print effects
+
+# Save interaction effect of the model in a dataframe
+## 300-400 ms
+T2int <- plot_m11b.T2[[3]] # save the interaction effect
+T2int.df <- as.data.frame(T2int) # convert into dataframe
+
+
+# Check reference levels
+# Factor Context
+contrasts(T2int.df$Context) # Neutral is reference level --> correct
+
+# Factor Idiomaticity
+contrasts(T2int.df$Idiomaticity) # Idiom is reference level --> relevel
+T2int.df$Idiomaticity <- factor(T2int.df$Idiomaticity, levels=c("Lit", "Idiom"))
+contrasts(T2int.df$Idiomaticity) # Now Lit is reference level --> correct
+
+# Rename factor levels Idiomaticity
+levels(T2int.df$Idiomaticity)[levels(T2int.df$Idiomaticity)=="Lit"] <- "Literal"
+levels(T2int.df$Idiomaticity)[levels(T2int.df$Idiomaticity)=="Idiom"] <- "Idiomatic"
+contrasts(T2int.df$Idiomaticity)
+
+# Factor Correctness
+contrasts(T2int.df$Correctness) # correct is reference level
+
+# Print range mV
+range(T2int.df$fit) # 0.92 till 2.63
+
+
+## Plot interaction Context * Idiomaticity * Correctness
+### Literal sentences
+(TW2_Lit_bar <- ggplot(data=T2int.df[T2int.df$Idiomaticity=="Literal",], aes(x=Context, y=fit, fill=Correctness)) +
+  geom_bar(stat="identity", position=position_dodge(), linetype=0) +
+  scale_fill_grey() + coord_cartesian(ylim=c(-1,4)) + scale_y_continuous(breaks=seq(-1,4,1)) +
+  background_grid(major='y', minor="none") + labs(x=NULL, y="\nFitted values mV") +
+  ggtitle("300-400 ms\nLiteral sentences") + theme_classic() +
+  theme(plot.title=element_text(size= 16, color="black", face="bold", hjust=0.5), axis.title.y=element_text(size=16, color="black", face="bold"), axis.text=element_text(size=16, color="black", face="bold"), legend.text=element_text(size=14, color="black"),
+legend.title=element_text(size=16, color="black", face="bold"), plot.margin=margin(r=1, l=1, unit="cm"), panel.grid.major.y=element_line(colour="lightgrey", size=0.2))+
+  geom_errorbar(aes(ymin=fit-se, ymax=fit+se), width=0.2, position=position_dodge(0.9)))
+
+### Predictive context
+(TW2_Idiom_bar <- ggplot(data=T2int.df[T2int.df$Idiomaticity=="Idiomatic",], aes(x=Context, y=fit, fill=Correctness)) +
+  geom_bar(stat="identity", position=position_dodge(), linetype=0) +
+  scale_fill_grey() + coord_cartesian(ylim=c(-1,4)) + scale_y_continuous(breaks=seq(-1,4,1)) +
+  background_grid(major='y', minor="none") + labs(x=NULL, y="\nFitted values mV") +
+  ggtitle("300-400 ms\nIdiomatic sentences") + theme_classic() +
+  theme(plot.title=element_text(size= 16, color="black", face="bold", hjust=0.5), axis.title.y=element_text(size=16, color="black", face="bold"), axis.text=element_text(size=16, color="black", face="bold"), legend.text=element_text(size=14, color="black"),
+legend.title=element_text(size=16, color="black", face="bold"), plot.margin=margin(r=1, l=1, unit="cm"), panel.grid.major.y=element_line(colour="lightgrey", size=0.2))+
+  geom_errorbar(aes(ymin=fit-se, ymax=fit+se), width=0.2, position=position_dodge(0.9)))
+
+# Combine plots
+## Delete legend
+TW2_Lit_bar_nolegend <- TW2_Lit_bar + theme(legend.position = "none")
+TW2_Idiom_bar_nolegend <- TW2_Idiom_bar + theme(legend.position = "none")
+
+# Save legend
+legendN400TW2 <- get_legend(TW2_Lit_bar + theme(legend.position = "bottom", legend.justification = "top"))
+
+# Make one plot
+(intN400_TW2 <- grid.arrange(TW2_Lit_bar_nolegend, TW2_Idiom_bar_nolegend,
+                                        ncol=2, top=textGrob("300-400 ms\n",
+                                        gp=gpar(fontsize=16, fontface="bold")), bottom=legendN400TW2))
+
+# Add significance stars
+## Write function to add brackets and save plot
+bracketsGrob <- function(...){
+l <- list(...)
+e <- new.env()
+e$l <- l
+  grid:::recordGrob(  {
+    do.call(grid.brackets, l)
+  }, e)
+}
+
+# Define position of brackets
+## Literal sentences
+b1 <- bracketsGrob(0.18, 0.85, 0.37, 0.85, h=0.02, lwd=1, col="black", type=1, ticks=NULL) # Literal incorrect - correct
+b2 <- bracketsGrob(0.63, 0.85, 0.82, 0.85, h=0.02,  lwd=1, col="black", type=1, ticks=NULL) # Idiomatic incorrect - correct
+b3 <- bracketsGrob(0.63, 0.15, 0.18, 0.15, h=0.02,  lwd=1, col="black", type=1, ticks=NULL) # correct literal - idiomatic
+
+
+## Add brackets and significance stars to plot
+(intN400_TW2_Lit <- TW2_Lit_bar + 
+                    annotation_custom(b1) + annotation_custom(b2) + 
+                    annotation_custom(b3) + 
+                    annotate("text", label="**", x=1.00, y= 3.60) + # Neut Lit incorrect - correct
+                    annotate("text", label="***", x=2.00, y= 3.60) + # Pred Lit incorrect - correct
+                    annotate("text", label="**", x=1.30, y= -0.65))  # Lit Correct Pred-Neut
+
+## Idiomatic sentences
+b1 <- bracketsGrob(0.18, 0.85, 0.37, 0.85, h=0.02, lwd=1, col="black", type=1, ticks=NULL) # Literal incorrect - correct
+b2 <- bracketsGrob(0.63, 0.85, 0.82, 0.85, h=0.02,  lwd=1, col="black", type=1, ticks=NULL) # Idiomatic incorrect - correct
+b3 <- bracketsGrob(0.63, 0.15, 0.18, 0.15, h=0.02,  lwd=1, col="black", type=1, ticks=NULL) # correct literal - idiomatic
+
+
+## Add brackets and significance stars to plot
+(intN400_TW2_Idiom <- TW2_Idiom_bar + 
+                    annotation_custom(b1) + annotation_custom(b2) + 
+                    annotate("text", label="***", x=1.00, y= 3.60) + # Neut Idiom incorrect - correct
+                    annotate("text", label="***", x=2.00, y= 3.60)) + # Pred Idiom incorrect - correct
+
+## Combine plots literal and idiomatic sentences
+(TW2_ContIdiomCor_bar <- cowplot::plot_grid(intN400_TW2_Lit + theme(legend.position="bottom"),
+                            intN400_TW2_Idiom + theme(legend.position="bottom"),
+                            ncol=2, nrow=1, align='vh'))
+  
+# Save plot
+# ggsave(TW2_ContIdiomCor_bar, file="./Plots/Rplots/TW2_ContIdiomCor_bar.png", width=10, height=5, units="in")
+# ggsave(TW2_ContIdiomCor_bar, file="./Plots/Rplots/TW2_ContIdiomCor_bar.pdf", width=10, height=5, units="in")
+# ggsave(TW2_ContIdiomCor_bar, file="./Plots/Rplots/TW2_ContIdiomCor_bar.tiff", width=10, height=5, units="in")
+```
+
+
+## Present interaction Context x Idiomaticity x Correctness in lineplot
+### Separately for baseline and follow-up session
+#### Baseline - Literal sentences
+```{r, fig.width=20, fig.height=15}
+
+# Baseline - Posterior left - Neutral context - Literal sentences
+(NeutLitPostLeftT1 <- ggplot() + geom_rect(data = data.frame(xmin = 300, xmax = 400, ymin = -2.5, ymax = 7),
+            aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax), fill="green", colour="black", size=0.75, linetype="dotted", alpha = 0.5) +
+   geom_rect(data = data.frame(xmin = 400, xmax = 500, ymin = -2.5, ymax = 7),
+            aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax), fill="green", colour="black", size=0.75, linetype="dotted", alpha = 0.5) +
+   geom_rect(data = data.frame(xmin = 500, xmax = 800, ymin = -2.5, ymax = 7),
+            aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax), fill="red", colour="black", size=0.75, linetype="dotted", alpha = 0.5) +
+  geom_line(data=PostLeft[PostLeft$Session =="T1" & PostLeft$Idiomaticity=="Lit" & PostLeft$Context == "Neutral",], 
+                           aes(x=Time, y=mean.mV, colour=Correctness, linetype=Correctness, size=Correctness)) + 
+                           scale_color_manual(values=c("black", "black")) +
+                           scale_linetype_manual(values=c("solid","dashed")) +
+                           scale_size_manual(values=c(1,1)) +
+                           scale_x_continuous(limits=c(-150, 1200), breaks=c(-150,0,200,400,600,800,1000,1200)) +
+                           scale_y_reverse(lim=c(7,-2.5), breaks=c(6,4,2,0,-2)) +
+                           labs(title="Posterior left\nNeutral - Literal", y="mV", x="\nTime\n") +
+                           geom_hline(yintercept=0, linetype="dotted", size=0.5) +
+                           geom_vline(xintercept=0, linetype="dotted",size=0.5) +
+                           theme_classic() +
+                           theme(plot.title=element_text(size=28, face="bold", color="black", hjust=0.5), 
+                           axis.title=element_text(size=28, face="bold", color="black"), 
+                           axis.text=element_text(size=24, face="bold", color="black"),
+                           axis.text.x=element_text(vjust=-2),
+                           axis.ticks = element_line(size=1), axis.ticks.length = unit(0.3,"cm"),
+                           legend.title=element_text(size=28, face="bold", color="black"),
+                           legend.text=element_text(size=26, face="bold", color="black"),
+                           plot.margin=margin(r=1,l=0.5, unit="cm"),
+                           legend.key=element_blank(),
+                           legend.key.width=unit(2, "cm"),
+                           legend.position="bottom", 
+                           legend.box.background=element_blank()))
+
+# Baseline - Posterior right - Neutral context - Literal sentences
+(NeutLitPostRightT1 <- ggplot() + geom_rect(data = data.frame(xmin = 300, xmax = 400, ymin = -2.5, ymax = 7),
+            aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax), fill="green", colour="black", size=0.75, linetype="dotted", alpha = 0.5) +
+   geom_rect(data = data.frame(xmin = 400, xmax = 500, ymin = -2.5, ymax = 7),
+            aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax), fill="green", colour="black", size=0.75, linetype="dotted", alpha = 0.5) +
+   geom_rect(data = data.frame(xmin = 500, xmax = 800, ymin = -2.5, ymax = 7),
+            aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax), fill="red", colour="black", size=0.75, linetype="dotted", alpha = 0.5) +
+  geom_line(data=PostRight[PostRight$Session =="T1" & PostRight$Idiomaticity=="Lit" & PostRight$Context == "Neutral",], 
+                           aes(x=Time, y=mean.mV, colour=Correctness, linetype=Correctness, size=Correctness)) + 
+                           scale_color_manual(values=c("black", "black")) +
+                           scale_linetype_manual(values=c("solid","dashed")) +
+                           scale_size_manual(values=c(1,1)) +
+                           scale_x_continuous(limits=c(-150, 1200), breaks=c(-150,0,200,400,600,800,1000,1200)) +
+                           scale_y_reverse(lim=c(7,-2.5), breaks=c(6,4,2,0,-2)) +
+                           labs(title="Posterior right\nNeutral - Literal", y="mV", x="\nTime\n") +
+                           geom_hline(yintercept=0, linetype="dotted", size=0.5) +
+                           geom_vline(xintercept=0, linetype="dotted",size=0.5) +
+                           theme_classic() +
+                           theme(plot.title=element_text(size=28, face="bold", color="black", hjust=0.5), 
+                           axis.title=element_text(size=28, face="bold", color="black"), 
+                           axis.text=element_text(size=24, face="bold", color="black"),
+                           axis.text.x=element_text(vjust=-2),
+                           axis.ticks = element_line(size=1), axis.ticks.length = unit(0.3,"cm"),
+                           legend.title=element_text(size=28, face="bold", color="black"),
+                           legend.text=element_text(size=26, face="bold", color="black"),
+                           plot.margin=margin(r=1,l=0.5, unit="cm"),
+                           legend.key=element_blank(),
+                           legend.key.width=unit(2, "cm"),
+                           legend.position="bottom", 
+                           legend.box.background=element_blank()))
+
+# Baseline - Posterior left - Predictive context - Literal sentences
+(PredLitPostLeftT1 <- ggplot() + geom_rect(data = data.frame(xmin = 300, xmax = 400, ymin = -2.5, ymax = 7),
+            aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax), fill="green", colour="black", size=0.75, linetype="dotted", alpha = 0.5) +
+   geom_rect(data = data.frame(xmin = 400, xmax = 500, ymin = -2.5, ymax = 7),
+            aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax), fill="green", colour="black", size=0.75, linetype="dotted", alpha = 0.5) +
+   geom_rect(data = data.frame(xmin = 500, xmax = 800, ymin = -2.5, ymax = 7),
+            aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax), fill="red", colour="black", size=0.75, linetype="dotted", alpha = 0.5) +
+  geom_line(data=PostLeft[PostLeft$Session =="T1" & PostLeft$Idiomaticity=="Lit" & PostLeft$Context == "Predictive",], 
+                           aes(x=Time, y=mean.mV, colour=Correctness, linetype=Correctness, size=Correctness)) + 
+                           scale_color_manual(values=c("black", "black")) +
+                           scale_linetype_manual(values=c("solid","dashed")) +
+                           scale_size_manual(values=c(1,1)) +
+                           scale_x_continuous(limits=c(-150, 1200), breaks=c(-150,0,200,400,600,800,1000,1200)) +
+                           scale_y_reverse(lim=c(7,-2.5), breaks=c(6,4,2,0,-2)) +
+                           labs(title="Posterior left\nPredictive - Literal", y="mV", x="\nTime\n") +
+                           geom_hline(yintercept=0, linetype="dotted", size=0.5) +
+                           geom_vline(xintercept=0, linetype="dotted",size=0.5) +
+                           theme_classic() +
+                           theme(plot.title=element_text(size=28, face="bold", color="black", hjust=0.5), 
+                           axis.title=element_text(size=28, face="bold", color="black"), 
+                           axis.text=element_text(size=24, face="bold", color="black"),
+                           axis.text.x=element_text(vjust=-2),
+                           axis.ticks = element_line(size=1), axis.ticks.length = unit(0.3,"cm"),
+                           legend.title=element_text(size=28, face="bold", color="black"),
+                           legend.text=element_text(size=26, face="bold", color="black"),
+                           plot.margin=margin(r=1,l=0.5, unit="cm"),
+                           legend.key=element_blank(),
+                           legend.key.width=unit(2, "cm"),
+                           legend.position="bottom", 
+                           legend.box.background=element_blank()))
+
+# Baseline - Posterior right - Predictive context - Literal sentences
+(PredLitPostRightT1 <- ggplot() + geom_rect(data = data.frame(xmin = 300, xmax = 400, ymin = -2.5, ymax = 7),
+            aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax), fill="green", colour="black", size=0.75, linetype="dotted", alpha = 0.5) +
+   geom_rect(data = data.frame(xmin = 400, xmax = 500, ymin = -2.5, ymax = 7),
+            aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax), fill="green", colour="black", size=0.75, linetype="dotted", alpha = 0.5) +
+   geom_rect(data = data.frame(xmin = 500, xmax = 800, ymin = -2.5, ymax = 7),
+            aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax), fill="red", colour="black", size=0.75, linetype="dotted", alpha = 0.5) +
+  geom_line(data=PostRight[PostRight$Session =="T1" & PostRight$Idiomaticity=="Lit" & PostRight$Context == "Predictive",], 
+                           aes(x=Time, y=mean.mV, colour=Correctness, linetype=Correctness, size=Correctness)) + 
+                           scale_color_manual(values=c("black", "black")) +
+                           scale_linetype_manual(values=c("solid","dashed")) +
+                           scale_size_manual(values=c(1,1)) +
+                           scale_x_continuous(limits=c(-150, 1200), breaks=c(-150,0,200,400,600,800,1000,1200)) +
+                           scale_y_reverse(lim=c(7,-2.5), breaks=c(6,4,2,0,-2)) +
+                           labs(title="Posterior right\nPredictive - Literal", y="mV", x="\nTime\n") +
+                           geom_hline(yintercept=0, linetype="dotted", size=0.5) +
+                           geom_vline(xintercept=0, linetype="dotted",size=0.5) +
+                           theme_classic() +
+                           theme(plot.title=element_text(size=28, face="bold", color="black", hjust=0.5), 
+                           axis.title=element_text(size=28, face="bold", color="black"), 
+                           axis.text=element_text(size=24, face="bold", color="black"),
+                           axis.text.x=element_text(vjust=-2),
+                           axis.ticks = element_line(size=1), axis.ticks.length = unit(0.3,"cm"),
+                           legend.title=element_text(size=28, face="bold", color="black"),
+                           legend.text=element_text(size=26, face="bold", color="black"),
+                           plot.margin=margin(r=1,l=0.5, unit="cm"),
+                           legend.key=element_blank(),
+                           legend.key.width=unit(2, "cm"),
+                           legend.position="bottom", 
+                           legend.box.background=element_blank()))
+
+
+
+# Combine plots
+## Delete legend
+NeutLitPostLeftT1_nolegend <- NeutLitPostLeftT1 + theme(legend.position = "none")
+NeutLitPostRightT1_nolegend <- NeutLitPostRightT1 + theme(legend.position = "none")
+PredLitPostLeftT1_nolegend <- PredLitPostLeftT1 + theme(legend.position = "none")
+PredLitPostRightT1_nolegend <- PredLitPostRightT1 + theme(legend.position = "none")
+
+
+# Save legend
+legendN400T1_line <- get_legend(NeutLitPostLeftT1 + theme(legend.position = "bottom", legend.justification = "top"))
+
+# Make one plot
+(intN400_T1_Lit <- grid.arrange(NeutLitPostLeftT1_nolegend, NeutLitPostRightT1_nolegend,
+                                 PredLitPostLeftT1_nolegend, PredLitPostRightT1_nolegend,
+                                        ncol=2, top=textGrob("Baseline session\nLiteral sentences",
+                                        gp=gpar(fontsize=32, fontface="bold")), bottom=legendN400T1_line))
+
+# Save plots
+# ggsave(intN400_T1_Lit, file="./Plots/Rplots/intN400_T1_Lit.png", width=20, height=15, units="in")
+# ggsave(intN400_T1_Lit, file="./Plots/Rplots/intN400_T1_Lit.pdf", width=20, height=15, units="in")
+# ggsave(intN400_T1_Lit, file="./Plots/Rplots/intN400_T1_Lit.tiff", width=20, height=15, units="in")
+```
+
+
+### Baseline - Idiomatic sentences
+```{r, fig.width=20, fig.height=15}
+
+# Baseline - Posterior left - Neutral context - Idiomatic sentences
+(NeutIdiomPostLeftT1 <- ggplot() + geom_rect(data = data.frame(xmin = 300, xmax = 400, ymin = -2.5, ymax = 7),
+            aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax), fill="green", colour="black", size=0.75, linetype="dotted", alpha = 0.5) +
+   geom_rect(data = data.frame(xmin = 400, xmax = 500, ymin = -2.5, ymax = 7),
+            aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax), fill="green", colour="black", size=0.75, linetype="dotted", alpha = 0.5) +
+   geom_rect(data = data.frame(xmin = 500, xmax = 800, ymin = -2.5, ymax = 7),
+            aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax), fill="red", colour="black", size=0.75, linetype="dotted", alpha = 0.5) +
+  geom_line(data=PostLeft[PostLeft$Session =="T1" & PostLeft$Idiomaticity=="Idiom" & PostLeft$Context == "Neutral",], 
+                           aes(x=Time, y=mean.mV, colour=Correctness, linetype=Correctness, size=Correctness)) + 
+                           scale_color_manual(values=c("black", "black")) +
+                           scale_linetype_manual(values=c("solid","dashed")) +
+                           scale_size_manual(values=c(1,1)) +
+                           scale_x_continuous(limits=c(-150, 1200), breaks=c(-150,0,200,400,600,800,1000,1200)) +
+                           scale_y_reverse(lim=c(7,-2.5), breaks=c(6,4,2,0,-2)) +
+                           labs(title="Posterior left\nNeutral - Idiomatic",
+                           y="mV", x="\nTime\n") +
+                           geom_hline(yintercept=0, linetype="dotted", size=0.5) +
+                           geom_vline(xintercept=0, linetype="dotted",size=0.5) +
+                           theme_classic() +
+                           theme(plot.title=element_text(size=28, face="bold", color="black", hjust=0.5), 
+                           axis.title=element_text(size=28, face="bold", color="black"), 
+                           axis.text=element_text(size=24, face="bold", color="black"),
+                           axis.text.x=element_text(vjust=-2),
+                           axis.ticks = element_line(size=1), axis.ticks.length = unit(0.3,"cm"),
+                           legend.title=element_text(size=28, face="bold", color="black"),
+                           legend.text=element_text(size=26, face="bold", color="black"),
+                           plot.margin=margin(r=1,l=0.5, unit="cm"),
+                           legend.key=element_blank(),
+                           legend.key.width=unit(2, "cm"),
+                           legend.position="bottom", 
+                           legend.box.background=element_blank()))
+
+# Baseline - Posterior right - Neutral context - Idiomatic sentences
+(NeutIdiomPostRightT1 <- ggplot() + geom_rect(data = data.frame(xmin = 300, xmax = 400, ymin = -2.5, ymax = 7),
+            aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax), fill="green", colour="black", size=0.75, linetype="dotted", alpha = 0.5) +
+   geom_rect(data = data.frame(xmin = 400, xmax = 500, ymin = -2.5, ymax = 7),
+            aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax), fill="green", colour="black", size=0.75, linetype="dotted", alpha = 0.5) +
+   geom_rect(data = data.frame(xmin = 500, xmax = 800, ymin = -2.5, ymax = 7),
+            aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax), fill="red", colour="black", size=0.75, linetype="dotted", alpha = 0.5) +
+  geom_line(data=PostRight[PostRight$Session =="T1" & PostRight$Idiomaticity=="Idiom" & PostRight$Context == "Neutral",], 
+                           aes(x=Time, y=mean.mV, colour=Correctness, linetype=Correctness, size=Correctness)) + 
+                           scale_color_manual(values=c("black", "black")) +
+                           scale_linetype_manual(values=c("solid","dashed")) +
+                           scale_size_manual(values=c(1,1)) +
+                           scale_x_continuous(limits=c(-150, 1200), breaks=c(-150,0,200,400,600,800,1000,1200)) +
+                           scale_y_reverse(lim=c(7,-2.5), breaks=c(6,4,2,0,-2)) +
+                           labs(title="Posterior right\nNeutral - Idiomatic",
+                           y="mV", x="\nTime\n") +
+                           geom_hline(yintercept=0, linetype="dotted", size=0.5) +
+                           geom_vline(xintercept=0, linetype="dotted",size=0.5) +
+                           theme_classic() +
+                           theme(plot.title=element_text(size=28, face="bold", color="black", hjust=0.5), 
+                           axis.title=element_text(size=28, face="bold", color="black"), 
+                           axis.text=element_text(size=24, face="bold", color="black"),
+                           axis.text.x=element_text(vjust=-2),
+                           axis.ticks = element_line(size=1), axis.ticks.length = unit(0.3,"cm"),
+                           legend.title=element_text(size=28, face="bold", color="black"),
+                           legend.text=element_text(size=26, face="bold", color="black"),
+                           plot.margin=margin(r=1,l=0.5, unit="cm"),
+                           legend.key=element_blank(),
+                           legend.key.width=unit(2, "cm"),
+                           legend.position="bottom", 
+                           legend.box.background=element_blank()))
+
+# Baseline - Posterior left - Predictive context - Idiomatic sentences
+(PredIdiomPostLeftT1 <- ggplot() + geom_rect(data = data.frame(xmin = 300, xmax = 400, ymin = -2.5, ymax = 7),
+            aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax), fill="green", colour="black", size=0.75, linetype="dotted", alpha = 0.5) +
+   geom_rect(data = data.frame(xmin = 400, xmax = 500, ymin = -2.5, ymax = 7),
+            aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax), fill="green", colour="black", size=0.75, linetype="dotted", alpha = 0.5) +
+   geom_rect(data = data.frame(xmin = 500, xmax = 800, ymin = -2.5, ymax = 7),
+            aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax), fill="red", colour="black", size=0.75, linetype="dotted", alpha = 0.5) +
+  geom_line(data=PostLeft[PostLeft$Session =="T1" & PostLeft$Idiomaticity=="Idiom" & PostLeft$Context == "Predictive",], 
+                           aes(x=Time, y=mean.mV, colour=Correctness, linetype=Correctness, size=Correctness)) + 
+                           scale_color_manual(values=c("black", "black")) +
+                           scale_linetype_manual(values=c("solid","dashed")) +
+                           scale_size_manual(values=c(1,1)) +
+                           scale_x_continuous(limits=c(-150, 1200), breaks=c(-150,0,200,400,600,800,1000,1200)) +
+                           scale_y_reverse(lim=c(7,-2.5), breaks=c(6,4,2,0,-2)) +
+                           labs(title="Posterior left\nPredictive - Idiomatic",
+                           y="mV", x="\nTime\n") +
+                           geom_hline(yintercept=0, linetype="dotted", size=0.5) +
+                           geom_vline(xintercept=0, linetype="dotted",size=0.5) +
+                           theme_classic() +
+                           theme(plot.title=element_text(size=28, face="bold", color="black", hjust=0.5), 
+                           axis.title=element_text(size=28, face="bold", color="black"), 
+                           axis.text=element_text(size=24, face="bold", color="black"),
+                           axis.text.x=element_text(vjust=-2),
+                           axis.ticks = element_line(size=1), axis.ticks.length = unit(0.3,"cm"),
+                           legend.title=element_text(size=28, face="bold", color="black"),
+                           legend.text=element_text(size=26, face="bold", color="black"),
+                           plot.margin=margin(r=1,l=0.5, unit="cm"),
+                           legend.key=element_blank(),
+                           legend.key.width=unit(2, "cm"),
+                           legend.position="bottom", 
+                           legend.box.background=element_blank()))
+
+# Baseline - Posterior right - Predictive context - Idiomatic sentences
+(PredIdiomPostRightT1 <- ggplot() + geom_rect(data = data.frame(xmin = 300, xmax = 400, ymin = -2.5, ymax = 7),
+            aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax), fill="green", colour="black", size=0.75, linetype="dotted", alpha = 0.5) +
+   geom_rect(data = data.frame(xmin = 400, xmax = 500, ymin = -2.5, ymax = 7),
+            aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax), fill="green", colour="black", size=0.75, linetype="dotted", alpha = 0.5) +
+   geom_rect(data = data.frame(xmin = 500, xmax = 800, ymin = -2.5, ymax = 7),
+            aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax), fill="red", colour="black", size=0.75, linetype="dotted", alpha = 0.5) +
+  geom_line(data=PostRight[PostRight$Session =="T1" & PostRight$Idiomaticity=="Idiom" & PostRight$Context == "Predictive",], 
+                           aes(x=Time, y=mean.mV, colour=Correctness, linetype=Correctness, size=Correctness)) + 
+                           scale_color_manual(values=c("black", "black")) +
+                           scale_linetype_manual(values=c("solid","dashed")) +
+                           scale_size_manual(values=c(1,1)) +
+                           scale_x_continuous(limits=c(-150, 1200), breaks=c(-150,0,200,400,600,800,1000,1200)) +
+                           scale_y_reverse(lim=c(7,-2.5), breaks=c(6,4,2,0,-2)) +
+                           labs(title="Posterior right\nPredictive - Idiomatic",
+                           y="mV", x="\nTime\n") +
+                           geom_hline(yintercept=0, linetype="dotted", size=0.5) +
+                           geom_vline(xintercept=0, linetype="dotted",size=0.5) +
+                           theme_classic() +
+                           theme(plot.title=element_text(size=28, face="bold", color="black", hjust=0.5), 
+                           axis.title=element_text(size=28, face="bold", color="black"), 
+                           axis.text=element_text(size=24, face="bold", color="black"),
+                           axis.text.x=element_text(vjust=-2),
+                           axis.ticks = element_line(size=1), axis.ticks.length = unit(0.3,"cm"),
+                           legend.title=element_text(size=28, face="bold", color="black"),
+                           legend.text=element_text(size=26, face="bold", color="black"),
+                           plot.margin=margin(r=1,l=0.5, unit="cm"),
+                           legend.key=element_blank(),
+                           legend.key.width=unit(2, "cm"),
+                           legend.position="bottom", 
+                           legend.box.background=element_blank()))
+
+
+
+# Combine plots
+## Delete legend
+NeutIdiomPostLeftT1_nolegend <- NeutIdiomPostLeftT1 + theme(legend.position = "none")
+NeutIdiomPostRightT1_nolegend <- NeutIdiomPostRightT1 + theme(legend.position = "none")
+PredIdiomPostLeftT1_nolegend <- PredIdiomPostLeftT1 + theme(legend.position = "none")
+PredIdiomPostRightT1_nolegend <- PredIdiomPostRightT1 + theme(legend.position = "none")
+
+
+# Save legend
+legendN400T1_line <- get_legend(NeutIdiomPostLeftT1 + theme(legend.position = "bottom", legend.justification = "top"))
+
+# Make one plot
+(intN400_T1_Idiom <- grid.arrange(NeutIdiomPostLeftT1_nolegend, NeutIdiomPostRightT1_nolegend,
+                                 PredIdiomPostLeftT1_nolegend, PredIdiomPostRightT1_nolegend,
+                                        ncol=2, top=textGrob("Baseline session\nIdiomatic sentences",
+                                        gp=gpar(fontsize=32, fontface="bold")), bottom=legendN400T1_line))
+
+# Save plots
+# ggsave(intN400_T1_Idiom, file="./Plots/Rplots/intN400_T1_Idiom.png", width=20, height=15, units="in")
+# ggsave(intN400_T1_Idiom, file="./Plots/Rplots/intN400_T1_Idiom.pdf", width=20, height=15, units="in")
+# ggsave(intN400_T1_Idiom, file="./Plots/Rplots/intN400_T1_Idiom.tiff", width=20, height=15, units="in")
+```
+
+#### Follow-up - Literal sentences
+```{r, fig.width=20, fig.height=15}
+
+# Follow-up - Posterior left - Neutral context - Literal sentences
+(NeutLitPostLeftT2 <- ggplot() + geom_rect(data = data.frame(xmin = 300, xmax = 400, ymin = -2.5, ymax = 7),
+            aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax), fill="green", colour="black", size=0.75, linetype="dotted", alpha = 0.5) +
+   geom_rect(data = data.frame(xmin = 400, xmax = 500, ymin = -2.5, ymax = 7),
+            aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax), fill="green", colour="black", size=0.75, linetype="dotted", alpha = 0.5) +
+   geom_rect(data = data.frame(xmin = 500, xmax = 800, ymin = -2.5, ymax = 7),
+            aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax), fill="red", colour="black", size=0.75, linetype="dotted", alpha = 0.5) +
+  geom_line(data=PostLeft[PostLeft$Session =="T2" & PostLeft$Idiomaticity=="Lit" & PostLeft$Context == "Neutral",], 
+                           aes(x=Time, y=mean.mV, colour=Correctness, linetype=Correctness, size=Correctness)) + 
+                           scale_color_manual(values=c("black", "black")) +
+                           scale_linetype_manual(values=c("solid","dashed")) +
+                           scale_size_manual(values=c(1,1)) +
+                           scale_x_continuous(limits=c(-150, 1200), breaks=c(-150,0,200,400,600,800,1000,1200)) +
+                           scale_y_reverse(lim=c(7,-2.5), breaks=c(6,4,2,0,-2)) +
+                           labs(title="Posterior left\nNeutral - Literal",
+                           y="mV", x="\nTime\n") +
+                           geom_hline(yintercept=0, linetype="dotted", size=0.5) +
+                           geom_vline(xintercept=0, linetype="dotted",size=0.5) +
+                           theme_classic() +
+                           theme(plot.title=element_text(size=28, face="bold", color="black", hjust=0.5), 
+                           axis.title=element_text(size=28, face="bold", color="black"), 
+                           axis.text=element_text(size=24, face="bold", color="black"),
+                           axis.text.x=element_text(vjust=-2),
+                           axis.ticks = element_line(size=1), axis.ticks.length = unit(0.3,"cm"),
+                           legend.title=element_text(size=28, face="bold", color="black"),
+                           legend.text=element_text(size=26, face="bold", color="black"),
+                           plot.margin=margin(r=1,l=0.5, unit="cm"),
+                           legend.key=element_blank(),
+                           legend.key.width=unit(2, "cm"),
+                           legend.position="bottom", 
+                           legend.box.background=element_blank()))
+
+# Follow-up - Posterior right - Neutral context - Literal sentences
+(NeutLitPostRightT2 <- ggplot() + geom_rect(data = data.frame(xmin = 300, xmax = 400, ymin = -2.5, ymax = 7),
+            aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax), fill="green", colour="black", size=0.75, linetype="dotted", alpha = 0.5) +
+   geom_rect(data = data.frame(xmin = 400, xmax = 500, ymin = -2.5, ymax = 7),
+            aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax), fill="green", colour="black", size=0.75, linetype="dotted", alpha = 0.5) +
+   geom_rect(data = data.frame(xmin = 500, xmax = 800, ymin = -2.5, ymax = 7),
+            aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax), fill="red", colour="black", size=0.75, linetype="dotted", alpha = 0.5) +
+  geom_line(data=PostRight[PostRight$Session =="T2" & PostRight$Idiomaticity=="Lit" & PostRight$Context == "Neutral",], 
+                           aes(x=Time, y=mean.mV, colour=Correctness, linetype=Correctness, size=Correctness)) + 
+                           scale_color_manual(values=c("black", "black")) +
+                           scale_linetype_manual(values=c("solid","dashed")) +
+                           scale_size_manual(values=c(1,1)) +
+                           scale_x_continuous(limits=c(-150, 1200), breaks=c(-150,0,200,400,600,800,1000,1200)) +
+                           scale_y_reverse(lim=c(7,-2.5), breaks=c(6,4,2,0,-2)) +
+                           labs(title="Posterior right\nNeutral - Literal",
+                           y="mV", x="\nTime\n") +
+                           geom_hline(yintercept=0, linetype="dotted", size=0.5) +
+                           geom_vline(xintercept=0, linetype="dotted",size=0.5) +
+                           theme_classic() +
+                           theme(plot.title=element_text(size=28, face="bold", color="black", hjust=0.5), 
+                           axis.title=element_text(size=28, face="bold", color="black"), 
+                           axis.text=element_text(size=24, face="bold", color="black"),
+                           axis.text.x=element_text(vjust=-2),
+                           axis.ticks = element_line(size=1), axis.ticks.length = unit(0.3,"cm"),
+                           legend.title=element_text(size=28, face="bold", color="black"),
+                           legend.text=element_text(size=26, face="bold", color="black"),
+                           plot.margin=margin(r=1,l=0.5, unit="cm"),
+                           legend.key=element_blank(),
+                           legend.key.width=unit(2, "cm"),
+                           legend.position="bottom", 
+                           legend.box.background=element_blank()))
+
+# Follow-up - Posterior left - Predictive context - Literal sentences
+(PredLitPostLeftT2 <- ggplot() + geom_rect(data = data.frame(xmin = 300, xmax = 400, ymin = -2.5, ymax = 7),
+            aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax), fill="green", colour="black", size=0.75, linetype="dotted", alpha = 0.5) +
+   geom_rect(data = data.frame(xmin = 400, xmax = 500, ymin = -2.5, ymax = 7),
+            aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax), fill="green", colour="black", size=0.75, linetype="dotted", alpha = 0.5) +
+   geom_rect(data = data.frame(xmin = 500, xmax = 800, ymin = -2.5, ymax = 7),
+            aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax), fill="red", colour="black", size=0.75, linetype="dotted", alpha = 0.5) +
+  geom_line(data=PostLeft[PostLeft$Session =="T2" & PostLeft$Idiomaticity=="Lit" & PostLeft$Context == "Predictive",], 
+                           aes(x=Time, y=mean.mV, colour=Correctness, linetype=Correctness, size=Correctness)) + 
+                           scale_color_manual(values=c("black", "black")) +
+                           scale_linetype_manual(values=c("solid","dashed")) +
+                           scale_size_manual(values=c(1,1)) +
+                           scale_x_continuous(limits=c(-150, 1200), breaks=c(-150,0,200,400,600,800,1000,1200)) +
+                           scale_y_reverse(lim=c(7,-2.5), breaks=c(6,4,2,0,-2)) +
+                           labs(title="Posterior left\nPredictive - Literal",
+                           y="mV", x="\nTime\n") +
+                           geom_hline(yintercept=0, linetype="dotted", size=0.5) +
+                           geom_vline(xintercept=0, linetype="dotted",size=0.5) +
+                           theme_classic() +
+                           theme(plot.title=element_text(size=28, face="bold", color="black", hjust=0.5), 
+                           axis.title=element_text(size=28, face="bold", color="black"), 
+                           axis.text=element_text(size=24, face="bold", color="black"),
+                           axis.text.x=element_text(vjust=-2),
+                           axis.ticks = element_line(size=1), axis.ticks.length = unit(0.3,"cm"),
+                           legend.title=element_text(size=28, face="bold", color="black"),
+                           legend.text=element_text(size=26, face="bold", color="black"),
+                           plot.margin=margin(r=1,l=0.5, unit="cm"),
+                           legend.key=element_blank(),
+                           legend.key.width=unit(2, "cm"),
+                           legend.position="bottom", 
+                           legend.box.background=element_blank()))
+
+# Follow-up - Posterior right - Predictive context - Literal sentences
+(PredLitPostRightT2 <- ggplot() + geom_rect(data = data.frame(xmin = 300, xmax = 400, ymin = -2.5, ymax = 7),
+            aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax), fill="green", colour="black", size=0.75, linetype="dotted", alpha = 0.5) +
+   geom_rect(data = data.frame(xmin = 400, xmax = 500, ymin = -2.5, ymax = 7),
+            aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax), fill="green", colour="black", size=0.75, linetype="dotted", alpha = 0.5) +
+   geom_rect(data = data.frame(xmin = 500, xmax = 800, ymin = -2.5, ymax = 7),
+            aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax), fill="red", colour="black", size=0.75, linetype="dotted", alpha = 0.5) +
+  geom_line(data=PostRight[PostRight$Session =="T2" & PostRight$Idiomaticity=="Lit" & PostRight$Context == "Predictive",], 
+                           aes(x=Time, y=mean.mV, colour=Correctness, linetype=Correctness, size=Correctness)) + 
+                           scale_color_manual(values=c("black", "black")) +
+                           scale_linetype_manual(values=c("solid","dashed")) +
+                           scale_size_manual(values=c(1,1)) +
+                           scale_x_continuous(limits=c(-150, 1200), breaks=c(-150,0,200,400,600,800,1000,1200)) +
+                           scale_y_reverse(lim=c(7,-2.5), breaks=c(6,4,2,0,-2)) +
+                           labs(title="Posterior right\nPredictive - Literal",
+                           y="mV", x="\nTime\n") +
+                           geom_hline(yintercept=0, linetype="dotted", size=0.5) +
+                           geom_vline(xintercept=0, linetype="dotted",size=0.5) +
+                           theme_classic() +
+                           theme(plot.title=element_text(size=28, face="bold", color="black", hjust=0.5), 
+                           axis.title=element_text(size=28, face="bold", color="black"), 
+                           axis.text=element_text(size=24, face="bold", color="black"),
+                           axis.text.x=element_text(vjust=-2),
+                           axis.ticks = element_line(size=1), axis.ticks.length = unit(0.3,"cm"),
+                           legend.title=element_text(size=28, face="bold", color="black"),
+                           legend.text=element_text(size=26, face="bold", color="black"),
+                           plot.margin=margin(r=1,l=0.5, unit="cm"),
+                           legend.key=element_blank(),
+                           legend.key.width=unit(2, "cm"),
+                           legend.position="bottom", 
+                           legend.box.background=element_blank()))
+
+
+
+# Combine plots
+## Delete legend
+NeutLitPostLeftT2_nolegend <- NeutLitPostLeftT2 + theme(legend.position = "none")
+NeutLitPostRightT2_nolegend <- NeutLitPostRightT2 + theme(legend.position = "none")
+PredLitPostLeftT2_nolegend <- PredLitPostLeftT2 + theme(legend.position = "none")
+PredLitPostRightT2_nolegend <- PredLitPostRightT2 + theme(legend.position = "none")
+
+
+# Save legend
+legendN400T2_line <- get_legend(NeutLitPostLeftT2 + theme(legend.position = "bottom", legend.justification = "top"))
+
+# Make one plot
+(intN400_T2_Lit <- grid.arrange(NeutLitPostLeftT2_nolegend, NeutLitPostRightT2_nolegend,
+                                 PredLitPostLeftT2_nolegend, PredLitPostRightT2_nolegend,
+                                        ncol=2, top=textGrob("Follow-up session\nLiteral sentences",
+                                        gp=gpar(fontsize=32, fontface="bold")), bottom=legendN400T2_line))
+
+# Save plots
+# ggsave(intN400_T2_Lit, file="./Plots/Rplots/intN400_T2_Lit.png", width=20, height=15, units="in")
+# ggsave(intN400_T2_Lit, file="./Plots/Rplots/intN400_T2_Lit.pdf", width=20, height=15, units="in")
+# ggsave(intN400_T2_Lit, file="./Plots/Rplots/intN400_T2_Lit.tiff", width=20, height=15, units="in")
+```
+
+
+#### Follow-up - Idiomatic sentences
+```{r, fig.width=20, fig.height=15}
+
+# Follow-up - Posterior left - Neutral context - Idiomatic sentences
+(NeutIdiomPostLeftT2 <- ggplot() + geom_rect(data = data.frame(xmin = 300, xmax = 400, ymin = -2.5, ymax = 7),
+            aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax), fill="green", colour="black", size=0.75, linetype="dotted", alpha = 0.5) +
+   geom_rect(data = data.frame(xmin = 400, xmax = 500, ymin = -2.5, ymax = 7),
+            aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax), fill="green", colour="black", size=0.75, linetype="dotted", alpha = 0.5) +
+   geom_rect(data = data.frame(xmin = 500, xmax = 800, ymin = -2.5, ymax = 7),
+            aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax), fill="red", colour="black", size=0.75, linetype="dotted", alpha = 0.5) +
+  geom_line(data=PostLeft[PostLeft$Session =="T2" & PostLeft$Idiomaticity=="Idiom" & PostLeft$Context == "Neutral",], 
+                           aes(x=Time, y=mean.mV, colour=Correctness, linetype=Correctness, size=Correctness)) + 
+                           scale_color_manual(values=c("black", "black")) +
+                           scale_linetype_manual(values=c("solid","dashed")) +
+                           scale_size_manual(values=c(1,1)) +
+                           scale_x_continuous(limits=c(-150, 1200), breaks=c(-150,0,200,400,600,800,1000,1200)) +
+                           scale_y_reverse(lim=c(7,-2.5), breaks=c(6,4,2,0,-2)) +
+                           labs(title="Posterior left\nNeutral - Idiomatic",
+                           y="mV", x="\nTime\n") +
+                           geom_hline(yintercept=0, linetype="dotted", size=0.5) +
+                           geom_vline(xintercept=0, linetype="dotted",size=0.5) +
+                           theme_classic() +
+                           theme(plot.title=element_text(size=28, face="bold", color="black", hjust=0.5), 
+                           axis.title=element_text(size=28, face="bold", color="black"), 
+                           axis.text=element_text(size=24, face="bold", color="black"),
+                           axis.text.x=element_text(vjust=-2),
+                           axis.ticks = element_line(size=1), axis.ticks.length = unit(0.3,"cm"),
+                           legend.title=element_text(size=24, face="bold", color="black"),
+                           legend.text=element_text(size=24, face="bold", color="black"),
+                           plot.margin=margin(r=1,l=0.5, unit="cm"),
+                           legend.key=element_blank(),
+                           legend.key.width=unit(2, "cm"),
+                           legend.position="bottom", 
+                           legend.box.background=element_blank()))
+
+# Follow-up - Posterior right - Neutral context - Idiomatic sentences
+(NeutIdiomPostRightT2 <- ggplot() + geom_rect(data = data.frame(xmin = 300, xmax = 400, ymin = -2.5, ymax = 7),
+            aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax), fill="green", colour="black", size=0.75, linetype="dotted", alpha = 0.5) +
+   geom_rect(data = data.frame(xmin = 400, xmax = 500, ymin = -2.5, ymax = 7),
+            aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax), fill="green", colour="black", size=0.75, linetype="dotted", alpha = 0.5) +
+   geom_rect(data = data.frame(xmin = 500, xmax = 800, ymin = -2.5, ymax = 7),
+            aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax), fill="red", colour="black", size=0.75, linetype="dotted", alpha = 0.5) +
+  geom_line(data=PostRight[PostRight$Session =="T2" & PostRight$Idiomaticity=="Idiom" & PostRight$Context == "Neutral",], 
+                           aes(x=Time, y=mean.mV, colour=Correctness, linetype=Correctness, size=Correctness)) + 
+                           scale_color_manual(values=c("black", "black")) +
+                           scale_linetype_manual(values=c("solid","dashed")) +
+                           scale_size_manual(values=c(1,1)) +
+                           scale_x_continuous(limits=c(-150, 1200), breaks=c(-150,0,200,400,600,800,1000,1200)) +
+                           scale_y_reverse(lim=c(7,-2.5), breaks=c(6,4,2,0,-2)) +
+                           labs(title="Posterior right\nNeutral - Idiomatic",
+                           y="mV", x="\nTime\n") +
+                           geom_hline(yintercept=0, linetype="dotted", size=0.5) +
+                           geom_vline(xintercept=0, linetype="dotted",size=0.5) +
+                           theme_classic() +
+                           theme(plot.title=element_text(size=28, face="bold", color="black", hjust=0.5), 
+                           axis.title=element_text(size=28, face="bold", color="black"), 
+                           axis.text=element_text(size=24, face="bold", color="black"),
+                           axis.text.x=element_text(vjust=-2),
+                           axis.ticks = element_line(size=1), axis.ticks.length = unit(0.3,"cm"),
+                           legend.title=element_text(size=28, face="bold", color="black"),
+                           legend.text=element_text(size=26, face="bold", color="black"),
+                           plot.margin=margin(r=1,l=0.5, unit="cm"),
+                           legend.key=element_blank(),
+                           legend.key.width=unit(2, "cm"),
+                           legend.position="bottom", 
+                           legend.box.background=element_blank()))
+
+# Follow-up - Posterior left - Predictive context - Idiomatic sentences
+(PredIdiomPostLeftT2 <- ggplot() + geom_rect(data = data.frame(xmin = 300, xmax = 400, ymin = -2.5, ymax = 7),
+            aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax), fill="green", colour="black", size=0.75, linetype="dotted", alpha = 0.5) +
+   geom_rect(data = data.frame(xmin = 400, xmax = 500, ymin = -2.5, ymax = 7),
+            aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax), fill="green", colour="black", size=0.75, linetype="dotted", alpha = 0.5) +
+   geom_rect(data = data.frame(xmin = 500, xmax = 800, ymin = -2.5, ymax = 7),
+            aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax), fill="red", colour="black", size=0.75, linetype="dotted", alpha = 0.5) +
+  geom_line(data=PostLeft[PostLeft$Session =="T2" & PostLeft$Idiomaticity=="Idiom" & PostLeft$Context == "Predictive",], 
+                           aes(x=Time, y=mean.mV, colour=Correctness, linetype=Correctness, size=Correctness)) + 
+                           scale_color_manual(values=c("black", "black")) +
+                           scale_linetype_manual(values=c("solid","dashed")) +
+                           scale_size_manual(values=c(1,1)) +
+                           scale_x_continuous(limits=c(-150, 1200), breaks=c(-150,0,200,400,600,800,1000,1200)) +
+                           scale_y_reverse(lim=c(7,-2.5), breaks=c(6,4,2,0,-2)) +
+                           labs(title="Posterior left\nPredictive - Idiomatic",
+                           y="mV", x="\nTime\n") +
+                           geom_hline(yintercept=0, linetype="dotted", size=0.5) +
+                           geom_vline(xintercept=0, linetype="dotted",size=0.5) +
+                           theme_classic() +
+                           theme(plot.title=element_text(size=24, face="bold", color="black", hjust=0.5), 
+                           axis.title=element_text(size=28, face="bold", color="black"), 
+                           axis.text=element_text(size=24, face="bold", color="black"),
+                           axis.text.x=element_text(vjust=-2),
+                           axis.ticks = element_line(size=1), axis.ticks.length = unit(0.3,"cm"),
+                           legend.title=element_text(size=28, face="bold", color="black"),
+                           legend.text=element_text(size=26, face="bold", color="black"),
+                           plot.margin=margin(r=1,l=0.5, unit="cm"),
+                           legend.key=element_blank(),
+                           legend.key.width=unit(2, "cm"),
+                           legend.position="bottom", 
+                           legend.box.background=element_blank()))
+
+# Follow-up - Posterior right - Predictive context - Idiomatic sentences
+(PredIdiomPostRightT2 <- ggplot() + geom_rect(data = data.frame(xmin = 300, xmax = 400, ymin = -2.5, ymax = 7),
+            aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax), fill="green", colour="black", size=0.75, linetype="dotted", alpha = 0.5) +
+   geom_rect(data = data.frame(xmin = 400, xmax = 500, ymin = -2.5, ymax = 7),
+            aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax), fill="green", colour="black", size=0.75, linetype="dotted", alpha = 0.5) +
+   geom_rect(data = data.frame(xmin = 500, xmax = 800, ymin = -2.5, ymax = 7),
+            aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax), fill="red", colour="black", size=0.75, linetype="dotted", alpha = 0.5) +
+  geom_line(data=PostRight[PostRight$Session =="T2" & PostRight$Idiomaticity=="Idiom" & PostRight$Context == "Predictive",], 
+                           aes(x=Time, y=mean.mV, colour=Correctness, linetype=Correctness, size=Correctness)) + 
+                           scale_color_manual(values=c("black", "black")) +
+                           scale_linetype_manual(values=c("solid","dashed")) +
+                           scale_size_manual(values=c(1,1)) +
+                           scale_x_continuous(limits=c(-150, 1200), breaks=c(-150,0,200,400,600,800,1000,1200)) +
+                           scale_y_reverse(lim=c(7,-2.5), breaks=c(6,4,2,0,-2)) +
+                           labs(title="Posterior right\nPredictive - Idiomatic",
+                           y="mV", x="\nTime\n") +
+                           geom_hline(yintercept=0, linetype="dotted", size=0.5) +
+                           geom_vline(xintercept=0, linetype="dotted",size=0.5) +
+                           theme_classic() +
+                           theme(plot.title=element_text(size=28, face="bold", color="black", hjust=0.5), 
+                           axis.title=element_text(size=28, face="bold", color="black"), 
+                           axis.text=element_text(size=24, face="bold", color="black"),
+                           axis.text.x=element_text(vjust=-2),
+                           axis.ticks = element_line(size=1), axis.ticks.length = unit(0.3,"cm"),
+                           legend.title=element_text(size=28, face="bold", color="black"),
+                           legend.text=element_text(size=26, face="bold", color="black"),
+                           plot.margin=margin(r=1,l=0.5, unit="cm"),
+                           legend.key=element_blank(),
+                           legend.key.width=unit(2, "cm"),
+                           legend.position="bottom", 
+                           legend.box.background=element_blank()))
+
+
+
+# Combine plots
+## Delete legend
+NeutIdiomPostLeftT2_nolegend <- NeutIdiomPostLeftT2 + theme(legend.position = "none")
+NeutIdiomPostRightT2_nolegend <- NeutIdiomPostRightT2 + theme(legend.position = "none")
+PredIdiomPostLeftT2_nolegend <- PredIdiomPostLeftT2 + theme(legend.position = "none")
+PredIdiomPostRightT2_nolegend <- PredIdiomPostRightT2 + theme(legend.position = "none")
+
+
+# Save legend
+legendN400T2_line <- get_legend(NeutIdiomPostLeftT2 + theme(legend.position = "bottom", legend.justification = "top"))
+
+# Make one plot
+(intN400_T2_Idiom <- grid.arrange(NeutIdiomPostLeftT2_nolegend, NeutIdiomPostRightT2_nolegend,
+                                 PredIdiomPostLeftT2_nolegend, PredIdiomPostRightT2_nolegend,
+                                        ncol=2, top=textGrob("Follow-up session\nIdiomatic sentences",
+                                        gp=gpar(fontsize=32, fontface="bold")), bottom=legendN400T2_line))
+
+# Save plots
+# ggsave(intN400_T2_Idiom, file="./Plots/Rplots/intN400_T2_Idiom.png", width=20, height=15, units="in")
+# ggsave(intN400_T2_Idiom, file="./Plots/Rplots/intN400_T2_Idiom.pdf", width=20, height=15, units="in")
+# ggsave(intN400_T2_Idiom, file="./Plots/Rplots/intN400_T2_Idiom.tiff", width=20, height=15, units="in")
+```
+
