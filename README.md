@@ -1,8 +1,8 @@
 # follow-up-context
 
-Supplementary materials for paper: La Roi, A., Sprenger, S.A., & Hendriks, P. Longitudinal event-related potentials show that context-dependent sentence processing resists cognitive aging. September 2020. In preparation.
+Supplementary materials for paper: La Roi, A., Sprenger, S.A., & Hendriks, P. Longitudinal event-related potentials show that context-dependent sentence processing resists cognitive aging. Submitted September 2020.
 
-Last update: September 2, 2020
+Last update: November 2, 2020
 
 
 [1a. Lmer analysis of 300-400 ms time window](./Analysis_300-400ms_time_window.Rmd)
